@@ -9,6 +9,7 @@ module CloverRestaurant
 
       def initialize(custom_config = nil)
         @services = CloverRestaurant.services(custom_config)
+
         @data = {
           inventory: {},
           modifier_groups: [],
@@ -23,72 +24,156 @@ module CloverRestaurant
         @day_cache = {}
       end
 
+      def load_modifier_groups
+        puts "=== Fetching modifier groups ==="
+        modifier_groups_response = @services.with_cache(:modifier_groups) { @services.modifier.get_modifier_groups }
+
+        if modifier_groups_response && modifier_groups_response["elements"]
+          @data[:modifier_groups] = modifier_groups_response["elements"]
+          puts "Loaded #{@data[:modifier_groups].size} modifier groups."
+        else
+          puts "No modifier groups found! 🚨"
+          @data[:modifier_groups] = []
+        end
+      end
+
       def setup_restaurant(name = "Claude's Bistro")
-        # Cache the restaurant name to avoid unnecessary API calls
-        update_merchant_name(name)
+        puts "=== Setting up restaurant: #{name} ==="
 
-        # Load data safely with error handling for each section
-        begin
-          # Process inventory first
-          load_inventory
+        load_inventory
+        load_employees_and_roles
+        load_tables
+        load_modifier_groups
+        load_tax_rates
+        load_discounts # ✅ Ensure discounts are loaded
 
-          # Load modifier groups with error handling
+        puts "=== Fetching customers ==="
+        customers_response = @services.with_cache(:customers) { @services.customer.get_customers }
+
+        if customers_response && customers_response["elements"].any?
+          @data[:customers] = customers_response["elements"]
+          puts "Loaded #{@data[:customers].size} customers."
+        else
+          puts "No customers found. Creating test customers..."
+          create_test_customers(5)
+        end
+      end
+
+      def create_test_customers(count)
+        created_customers = []
+
+        count.times do |i|
+          customer_data = {
+            "firstName" => "TestCustomer#{i + 1}",
+            "lastName" => "Demo",
+            "email" => "testcustomer#{i + 1}@example.com"
+          }
+
           begin
-            @data[:modifier_groups] = @services.with_cache(:modifier_groups) { @services.modifier.get_modifier_groups }
-            if @data[:modifier_groups].is_a?(Hash) && @data[:modifier_groups]["elements"]
-              @data[:modifier_groups] = @data[:modifier_groups]["elements"]
+            response = @services.customer.create_customer(customer_data)
+            if response && response["id"]
+              created_customers << response
+              puts "Successfully created test customer: #{response["firstName"]} #{response["lastName"]} (ID: #{response["id"]})"
+            else
+              puts "ERROR: Failed to create customer. Response: #{response.inspect}"
             end
           rescue StandardError => e
-            puts "Warning: Error loading modifier groups: #{e.message}. Continuing with setup."
-            @data[:modifier_groups] = []
+            puts "ERROR: Exception while creating customer: #{e.message}"
           end
-
-          # Load tax rates with error handling
-          begin
-            @data[:tax_rates] = @services.with_cache(:tax_rates) { @services.tax_rate.get_tax_rates }
-            if @data[:tax_rates].is_a?(Hash) && @data[:tax_rates]["elements"]
-              @data[:tax_rates] = @data[:tax_rates]["elements"]
-            end
-          rescue StandardError => e
-            puts "Warning: Error loading tax rates: #{e.message}. Continuing with setup."
-            @data[:tax_rates] = []
-          end
-
-          # Load discounts with error handling
-          begin
-            @data[:discounts] = @services.with_cache(:discounts) { @services.discount.get_discounts }
-            if @data[:discounts].is_a?(Hash) && @data[:discounts]["elements"]
-              @data[:discounts] = @data[:discounts]["elements"]
-            end
-          rescue StandardError => e
-            puts "Warning: Error loading discounts: #{e.message}. Continuing with setup."
-            @data[:discounts] = []
-          end
-
-          # Load employees and roles with error handling
-          load_employees_and_roles
-
-          # Load tables with error handling
-          load_tables
-
-          # Load customers with error handling
-          begin
-            customers_data = @services.with_cache(:customers) { @services.customer.get_customers }
-            @data[:customers] = customers_data
-            if @data[:customers].is_a?(Hash) && @data[:customers]["elements"]
-              @data[:customers] = @data[:customers]["elements"]
-            end
-          rescue StandardError => e
-            puts "Warning: Error loading customers: #{e.message}. Continuing with setup."
-            @data[:customers] = []
-          end
-        rescue StandardError => e
-          puts "Error during full setup: #{e.message}"
-          puts "Continuing with partial data"
         end
 
-        # Return the restaurant data, even if partially loaded
-        @data
+        # Store the created customers in @data[:customers]
+        @data[:customers] = created_customers
+      end
+
+      def load_discounts
+        puts "=== Fetching discounts ==="
+        discounts_response = @services.with_cache(:discounts) { @services.discount.get_discounts }
+
+        existing_discounts = discounts_response && discounts_response["elements"] ? discounts_response["elements"] : []
+        @data[:discounts] = existing_discounts
+
+        if existing_discounts.size >= 4
+          puts "✅ Loaded #{existing_discounts.size} discounts."
+          return
+        else
+          puts "🚨 Only found #{existing_discounts.size} discounts! Creating more..."
+        end
+
+        required_discounts = [
+          { "name" => "Happy Hour", "amount" => 500, "percentage" => false }, # $5 off
+          { "name" => "Loyalty Discount", "amount" => 10, "percentage" => true }, # 10% off
+          { "name" => "Employee Discount", "amount" => 20, "percentage" => true }, # 20% off
+          { "name" => "Holiday Special", "amount" => 15, "percentage" => true } # 15% off
+        ]
+
+        created_discounts = []
+
+        required_discounts.each do |discount_data|
+          existing = existing_discounts.find { |d| d["name"] == discount_data["name"] }
+          if existing
+            puts "✅ Discount '#{discount_data["name"]}' already exists, skipping."
+            created_discounts << existing
+            next
+          end
+
+          puts "Creating discount: #{discount_data.inspect}"
+          response = @services.discount.create_discount(discount_data)
+
+          if response && response["id"]
+            puts "✅ Successfully created discount '#{response["name"]}' with ID: #{response["id"]}"
+            created_discounts << response
+          else
+            puts "❌ ERROR: Failed to create discount '#{discount_data["name"]}'. Response: #{response.inspect}"
+          end
+        end
+
+        @data[:discounts] += created_discounts
+      end
+
+      def load_tax_rates
+        puts "=== Fetching tax rates ==="
+        tax_rates_response = @services.with_cache(:tax_rates) { @services.tax.get_tax_rates }
+
+        existing_tax_rates = tax_rates_response && tax_rates_response["elements"] ? tax_rates_response["elements"] : []
+        @data[:tax_rates] = existing_tax_rates
+
+        if existing_tax_rates.size >= 4
+          puts "✅ Loaded #{existing_tax_rates.size} tax rates."
+          return
+        else
+          puts "🚨 Only found #{existing_tax_rates.size} tax rates! Creating more..."
+        end
+
+        required_tax_rates = [
+          { "name" => "Standard Tax", "rate" => 0.10 },  # 10%
+          { "name" => "Reduced Tax", "rate" => 0.05 },   # 5%
+          { "name" => "Food Tax", "rate" => 0.08 },      # 8%
+          { "name" => "Alcohol Tax", "rate" => 0.15 }    # 15%
+        ]
+
+        created_tax_rates = []
+
+        required_tax_rates.each do |tax_rate_data|
+          existing = existing_tax_rates.find { |t| t["name"] == tax_rate_data["name"] }
+          if existing
+            puts "✅ Tax rate '#{tax_rate_data["name"]}' already exists, skipping."
+            created_tax_rates << existing
+            next
+          end
+
+          puts "Creating tax rate: #{tax_rate_data.inspect}"
+          response = @services.tax.create_tax_rate(tax_rate_data)
+
+          if response && response["id"]
+            puts "✅ Successfully created tax rate '#{response["name"]}' with ID: #{response["id"]}"
+            created_tax_rates << response
+          else
+            puts "❌ ERROR: Failed to create tax rate '#{tax_rate_data["name"]}'. Response: #{response.inspect}"
+          end
+        end
+
+        @data[:tax_rates] += created_tax_rates
       end
 
       def simulate_business_day(date)
@@ -145,67 +230,52 @@ module CloverRestaurant
       private
 
       def load_inventory
-        begin
-          inventory_entities = @services.create_entities
-
-          if inventory_entities
-            # Get categories
-            @data[:inventory][:categories] = @services.with_cache(:categories) { @services.inventory.get_categories }
-            if @data[:inventory][:categories].is_a?(Hash) && @data[:inventory][:categories]["elements"]
-              @data[:inventory][:categories] = @data[:inventory][:categories]["elements"]
-            else
-              @data[:inventory][:categories] = []
-            end
-
-            # Get items
-            @data[:inventory][:items] = @services.with_cache(:items) { @services.inventory.get_items }
-            if @data[:inventory][:items].is_a?(Hash) && @data[:inventory][:items]["elements"]
-              @data[:inventory][:items] = @data[:inventory][:items]["elements"]
-            else
-              @data[:inventory][:items] = []
-            end
-          end
-        rescue StandardError => e
-          puts "Error loading inventory: #{e.message}. Continuing with setup."
+        puts "=== Fetching inventory categories ==="
+        categories_response = @services.with_cache(:categories) { @services.inventory.get_categories }
+        if categories_response && categories_response["elements"]
+          @data[:inventory][:categories] = categories_response["elements"]
+          puts "Loaded #{@data[:inventory][:categories].size} categories."
+        else
+          puts "No categories found."
           @data[:inventory][:categories] = []
+        end
+
+        puts "=== Fetching inventory items ==="
+        items_response = @services.with_cache(:items) { @services.inventory.get_items }
+        if items_response && items_response["elements"]
+          @data[:inventory][:items] = items_response["elements"]
+          puts "Loaded #{@data[:inventory][:items].size} items."
+        else
+          puts "No items found."
           @data[:inventory][:items] = []
         end
+      rescue StandardError => e
+        puts "Error loading inventory: #{e.message}"
+        @data[:inventory][:categories] = []
+        @data[:inventory][:items] = []
       end
 
       def load_employees_and_roles
-        begin
-          # Load roles first
-          @data[:roles] = @services.with_cache(:roles) { @services.employee.get_roles }
-          if @data[:roles].is_a?(Hash) && @data[:roles]["elements"]
-            @data[:roles] = @data[:roles]["elements"]
-          else
-            @data[:roles] = []
-          end
+        # Load roles first
+        @data[:roles] = @services.with_cache(:roles) { @services.employee.get_roles }
+        @data[:roles] = if @data[:roles].is_a?(Hash) && @data[:roles]["elements"]
+                          @data[:roles]["elements"]
+                        else
+                          []
+                        end
 
-          # Now load employees
-          employees_data = @services.with_cache(:employees) { @services.employee.get_employees }
-          @data[:employees] = employees_data
-          if @data[:employees].is_a?(Hash) && @data[:employees]["elements"]
-            @data[:employees] = @data[:employees]["elements"]
-          else
-            @data[:employees] = []
-          end
+        # Now load employees
+        employees_data = @services.with_cache(:employees) { @services.employee.get_employees }
+        @data[:employees] = employees_data
+        @data[:employees] = if @data[:employees].is_a?(Hash) && @data[:employees]["elements"]
+                              @data[:employees]["elements"]
+                            else
+                              []
+                            end
 
-          # If no employees found, create a fallback admin employee
-          if @data[:employees].empty?
-            puts "No employees found, using fallback employee data"
-            @data[:employees] = [
-              {
-                "id" => "ADMIN_USER",
-                "name" => "Test Admin",
-                "role" => "ADMIN",
-                "isOwner" => true
-              }
-            ]
-          end
-        rescue StandardError => e
-          puts "Warning: Error loading employees: #{e.message}. Using fallback."
-          # Create a fallback employee if loading fails
+        # If no employees found, create a fallback admin employee
+        if @data[:employees].empty?
+          puts "No employees found, using fallback employee data"
           @data[:employees] = [
             {
               "id" => "ADMIN_USER",
@@ -214,47 +284,78 @@ module CloverRestaurant
               "isOwner" => true
             }
           ]
-          @data[:roles] = []
         end
+      rescue StandardError => e
+        puts "Warning: Error loading employees: #{e.message}. Using fallback."
+        puts e.backtrace
+        # Create a fallback employee if loading fails
+        @data[:employees] = [
+          {
+            "id" => "ADMIN_USER",
+            "name" => "Test Admin",
+            "role" => "ADMIN",
+            "isOwner" => true
+          }
+        ]
+        @data[:roles] = []
       end
 
       def load_tables
-        begin
-          # Using POST to get tables since it seems GET is not allowed
-          tables_data = @services.with_cache(:tables) do
-            begin
-              # Try to get tables through a workaround if the API supports it
-              @services.table.get_tables
-            rescue StandardError => e
-              # Return empty array with elements if the endpoint fails
-              puts "Warning: Error fetching tables, using fallback table data"
-              { "elements" => generate_fallback_tables }
-            end
-          end
+        puts "=== Fetching tables ==="
+        tables_response = @services.with_cache(:tables) { @services.table.get_tables }
 
-          @data[:tables] = tables_data
-          if @data[:tables].is_a?(Hash) && @data[:tables]["elements"]
-            @data[:tables] = @data[:tables]["elements"]
-          else
-            @data[:tables] = generate_fallback_tables
-          end
-        rescue StandardError => e
-          puts "Warning: Error loading tables: #{e.message}. Using fallback."
+        if tables_response && tables_response["elements"].any?
+          @data[:tables] = tables_response["elements"]
+          puts "Loaded #{@data[:tables].size} tables."
+        else
+          puts "No tables found. Creating fallback tables..."
           @data[:tables] = generate_fallback_tables
         end
       end
 
+      def create_random_employees(count, roles)
+        puts "Creating #{count} random employees..."
+
+        created_employees = []
+
+        count.times do |i|
+          employee_data = {
+            "name" => "Employee#{i + 1}",
+            "nickname" => "Emp#{i + 1}",
+            "customId" => "EMP#{100 + i}",
+            "pin" => "#{1000 + i}", # Unique PIN
+            "role" => roles.first["id"], # ✅ Fix: Send role ID directly
+            "inviteSent" => false,
+            "isOwner" => false
+          }
+
+          begin
+            response = @services.employee.create_employee(employee_data)
+
+            if response && response["id"]
+              created_employees << response
+              puts "✅ Successfully created employee: #{response["name"]} (ID: #{response["id"]})"
+            else
+              puts "❌ ERROR: Failed to create employee. Response: #{response.inspect}"
+            end
+          rescue StandardError => e
+            puts "❌ ERROR: Exception while creating employee: #{e.message}"
+          end
+        end
+
+        @data[:employees] += created_employees
+      end
+
       def generate_fallback_tables
-        puts "Generating fallback table data"
-        # Create some fallback table data
+        puts "Generating fallback table data..."
         [
-          {"id" => "TABLE1", "name" => "Table 1", "maxSeats" => 4},
-          {"id" => "TABLE2", "name" => "Table 2", "maxSeats" => 2},
-          {"id" => "TABLE3", "name" => "Table 3", "maxSeats" => 6},
-          {"id" => "TABLE4", "name" => "Table 4", "maxSeats" => 8},
-          {"id" => "TABLE5", "name" => "Table 5", "maxSeats" => 4},
-          {"id" => "BAR1", "name" => "Bar Seat 1", "maxSeats" => 1},
-          {"id" => "BAR2", "name" => "Bar Seat 2", "maxSeats" => 1}
+          { "id" => "TABLE1", "name" => "Table 1", "maxSeats" => 4 },
+          { "id" => "TABLE2", "name" => "Table 2", "maxSeats" => 2 },
+          { "id" => "TABLE3", "name" => "Table 3", "maxSeats" => 6 },
+          { "id" => "TABLE4", "name" => "Table 4", "maxSeats" => 8 },
+          { "id" => "TABLE5", "name" => "Table 5", "maxSeats" => 4 },
+          { "id" => "BAR1", "name" => "Bar Seat 1", "maxSeats" => 1 },
+          { "id" => "BAR2", "name" => "Bar Seat 2", "maxSeats" => 1 }
         ]
       end
 
@@ -326,111 +427,51 @@ module CloverRestaurant
 
       def update_merchant_name(name)
         # Try to update the merchant name but don't fail if it doesn't work
-        begin
-          @services.merchant.update_merchant_property("name", name)
-        rescue StandardError => e
-          puts "Warning: Could not update merchant name: #{e.message}"
-        end
+
+        @services.merchant.update_merchant_property("name", name)
+      rescue StandardError => e
+        puts "Warning: Could not update merchant name: #{e.message}"
       end
 
       def create_order(date, time, employee, customer)
-        # Get all items
         items = @data[:inventory][:items]
+        discounts = @data[:discounts]
+
         return { error: "No items available" } if items.empty?
 
-        # Get order seed for deterministic randomness
-        order_seed = "#{date}-#{time}-#{employee["id"]}-#{customer["id"]}".hash.abs
+        item = items.sample
+        total_price = item["price"]
 
-        # Define dining option based on seed
-        dining_option = case order_seed % 10
-                        when 0, 1, 2 # 30% chance of takeout
-                          "TO_GO"
-                        when 3 # 10% chance of delivery
-                          "DELIVERY"
-                        else # 60% chance of dining in
-                          "HERE"
-                        end
-
-        # Number of items in order (1-5)
-        num_items = 1 + (order_seed % 5)
-
-        # Select items deterministically
-        selected_items = []
-        items_sold = {}
-
-        num_items.times do |i|
-          item_index = (order_seed + i * 7) % items.size
-          item = items[item_index]
-
-          # Quantity 1-3
-          quantity = 1 + ((order_seed + i) % 3)
-
-          selected_items << { item: item, quantity: quantity }
-
-          # Track items sold
-          items_sold[item["name"]] = quantity
-        end
-
-        # Create order
-        order_data = {
-          "employee" => { "id" => employee["id"] },
-          "diningOption" => dining_option
-        }
+        order_data = { "employee" => { "id" => employee["id"] }, "diningOption" => "HERE" }
 
         begin
-          # Create the order
+          puts "DEBUG: Creating order for employee #{employee["id"]} with customer #{customer["id"]}"
+
           order = @services.order.create_order(order_data)
 
-          if order && order["id"]
-            # Add customer
-            @services.order.add_customer_to_order(order["id"], customer["id"])
+          return { error: "Failed to create order" } unless order && order["id"]
 
-            # Add line items
-            total = 0
+          puts "DEBUG: Order created successfully: #{order["id"]}"
 
-            selected_items.each do |item_data|
-              item = item_data[:item]
-              quantity = item_data[:quantity]
+          @services.order.add_customer_to_order(order["id"], customer["id"])
+          @services.order.add_line_item(order["id"], item["id"], 1)
+          total = item["price"]
 
-              line_item = @services.order.add_line_item(order["id"], item["id"], quantity)
-
-              # Add the item cost to the total
-              total += (item["price"] * quantity) if line_item
-            end
-
-            # Add discount (30% chance, based on seed)
-            if order_seed % 10 < 3 && !@data[:discounts].empty?
-              discount_data = { "discount" => { "id" => @data[:discounts].sample["id"] } }
-              @services.order.add_discount(order["id"], discount_data)
-
-              # Recalculate total
-              total = @services.order.calculate_order_total(order["id"])
-            end
-
-            # Process payment
-            payment_type = order_seed % 10 < 7 ? :cash : :card
-
-            payment = if payment_type == :cash
-                        @services.payment.simulate_cash_payment(order["id"], total, { employee_id: employee["id"] })
-                      else
-                        @services.payment.simulate_card_payment(order["id"], total)
-                      end
-
-            # Return data
-            return {
-              order: order,
-              total: total,
-              payment: payment,
-              items_sold: items_sold
-            }
+          # Apply a discount with a 50% chance
+          if discounts.any? && rand < 0.5
+            discount = discounts.sample
+            puts "Applying discount: #{discount["name"]}"
+            @services.order.apply_discount(order["id"], discount["id"])
           end
-        rescue StandardError => e
-          # Log error but don't stop simulation
-          puts "Error creating order: #{e.message}" if @config&.log_level == Logger::DEBUG
-        end
 
-        # Return failure
-        { error: "Failed to create order" }
+          # Process payment
+          payment = @services.payment.simulate_cash_payment(order["id"], total, { employee_id: employee["id"] })
+
+          { order: order, total: total, payment: payment }
+        rescue StandardError => e
+          puts "ERROR: Exception when creating order: #{e.message}"
+          { error: "Failed to create order" }
+        end
       end
 
       def process_refund(order, employee)

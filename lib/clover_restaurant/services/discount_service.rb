@@ -15,24 +15,16 @@ module CloverRestaurant
       def create_discount(discount_data)
         logger.info "=== Creating new discount for merchant #{@config.merchant_id} ==="
 
-        # Check if a discount with this name already exists
-        existing_discounts = get_discounts
-        if existing_discounts && existing_discounts["elements"]
-          existing_discount = existing_discounts["elements"].find { |d| d["name"] == discount_data["name"] }
-          if existing_discount
-            logger.info "Discount '#{discount_data["name"]}' already exists with ID: #{existing_discount["id"]}, skipping creation"
-            return existing_discount
-          end
+        logger.info "Discount Data: #{discount_data.inspect}"
+        response = make_request(:post, endpoint("discounts"), discount_data)
+
+        if response && response["id"]
+          logger.info "✅ Successfully created discount '#{response["name"]}' with ID: #{response["id"]}"
+        else
+          logger.error "❌ ERROR: Discount creation failed. Response: #{response.inspect}"
         end
 
-        # IMPORTANT: Clover API requires discount amounts to be negative
-        if discount_data["amount"] && discount_data["amount"] > 0
-          logger.info "Converting positive amount to negative: #{discount_data["amount"]} -> #{-discount_data["amount"]}"
-          discount_data["amount"] = -discount_data["amount"]
-        end
-
-        logger.info "Discount data: #{discount_data.inspect}"
-        make_request(:post, endpoint("discounts"), discount_data)
+        response
       end
 
       def update_discount(discount_id, discount_data)

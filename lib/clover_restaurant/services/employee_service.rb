@@ -16,23 +16,57 @@ module CloverRestaurant
       end
 
       def create_employee(employee_data)
-        logger.info "=== Creating new employee for merchant #{@config.merchant_id} ==="
+        logger.info "=== Checking if employee '#{employee_data["name"]}' already exists ==="
 
-        # Check if employee with same name or PIN already exists
         existing_employees = get_employees
         if existing_employees && existing_employees["elements"]
           existing_employee = existing_employees["elements"].find do |emp|
-            emp["name"] == employee_data["name"] || (emp["pin"] && employee_data["pin"] && emp["pin"] == employee_data["pin"])
+            emp["name"] == employee_data["name"]
           end
 
           if existing_employee
-            logger.info "Employee with name '#{employee_data["name"]}' or PIN '#{employee_data["pin"]}' already exists, skipping creation"
+            logger.info "Employee '#{employee_data["name"]}' already exists with ID: #{existing_employee["id"]}, skipping creation."
             return existing_employee
           end
         end
 
-        logger.info "Employee data: #{employee_data.inspect}"
-        make_request(:post, endpoint("employees"), employee_data)
+        # Ensure role is set correctly
+        if employee_data["role"].is_a?(Hash) && employee_data["role"]["id"].is_a?(String)
+          # Ensure roles are formatted correctly
+          employee_data["roles"] = [{ "id" => employee_data["role"]["id"] }]
+        else
+          logger.info "=== Fetching available roles ==="
+          available_roles = get_roles
+          if available_roles && available_roles["elements"]
+            employee_role = available_roles["elements"].find { |r| r["name"] == "Employee" }
+          end
+
+          if employee_role.nil?
+            logger.error "❌ No valid 'Employee' role found! Cannot create employees."
+            return nil
+          end
+
+          # Correctly set the role ID as an array
+          employee_data["roles"] = [{ "id" => employee_role["id"] }]
+        end
+
+        # Remove 'role' field as it's not used in Clover API request
+        employee_data.delete("role")
+
+        # Remove 'pin' field (if necessary)
+        employee_data.delete("pin")
+
+        logger.info "Creating new employee: #{employee_data.inspect}"
+        response = make_request(:post, endpoint("employees"), employee_data)
+
+        if response && response["id"]
+          logger.info "✅ Successfully created employee '#{response["name"]}' with ID: #{response["id"]}"
+        else
+          logger.error "❌ ERROR: Employee creation failed. Response: #{response.inspect}"
+          return nil # Stop execution if employee creation fails
+        end
+
+        response
       end
 
       def update_employee(employee_id, employee_data)

@@ -92,7 +92,7 @@ module CloverRestaurant
       class_name = service_name.split("_").map(&:capitalize).join
 
       # Get the service class
-      service_class = Services.const_get(class_name)
+      service_class = Services.const_get("#{class_name}Service")
 
       # Create and return the service instance
       service_class.new(@config)
@@ -100,6 +100,7 @@ module CloverRestaurant
 
     def service_names
       %w[
+        merchant
         inventory
         modifier
         employee
@@ -112,6 +113,8 @@ module CloverRestaurant
         payment
         refund
         reservation
+        tax
+        tender
         tip
       ]
     end

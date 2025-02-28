@@ -1,10 +1,18 @@
 # lib/clover_restaurant/services/tax_rate_service.rb
 module CloverRestaurant
   module Services
-    class TaxRateService < BaseService
+    class TaxService < BaseService
       def get_tax_rates(limit = 100, offset = 0)
         logger.info "=== Fetching tax rates for merchant #{@config.merchant_id} ==="
-        make_request(:get, endpoint("tax_rates"), nil, { limit: limit, offset: offset })
+        response = make_request(:get, endpoint("tax_rates"), nil, { limit: limit, offset: offset })
+
+        if response && response["elements"]
+          logger.info "✅ Successfully fetched #{response["elements"].size} tax rates."
+        else
+          logger.warn "⚠️ WARNING: No tax rates found or API response is empty!"
+        end
+
+        response
       end
 
       def get_tax_rate(tax_rate_id)

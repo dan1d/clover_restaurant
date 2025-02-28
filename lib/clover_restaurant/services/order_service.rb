@@ -17,8 +17,18 @@ module CloverRestaurant
 
       def create_order(order_data = {})
         logger.info "=== Creating a new order for merchant #{@config.merchant_id} ==="
-        logger.info "Order data: #{order_data.inspect}"
-        make_request(:post, endpoint("orders"), order_data)
+
+        # Create order
+        order = make_request(:post, endpoint("orders"), order_data)
+        return nil unless order && order["id"]
+
+        order_id = order["id"]
+
+        # ✅ Mark order as paid (but DO NOT create payment here)
+        update_order(order_id, { "paymentState" => "PAID" })
+
+        logger.info "✅ Order #{order_id} marked as PAID."
+        order
       end
 
       def update_order(order_id, order_data)
@@ -95,6 +105,24 @@ module CloverRestaurant
       def delete_line_item(order_id, line_item_id)
         logger.info "=== Deleting line item #{line_item_id} from order #{order_id} ==="
         make_request(:delete, endpoint("orders/#{order_id}/line_items/#{line_item_id}"))
+      end
+
+      def apply_discount(order_id, discount_id)
+        logger.info "=== Applying discount #{discount_id} to order #{order_id} ==="
+
+        # Construct the request payload
+        payload = { "discount" => { "id" => discount_id } }
+
+        # Make the API request
+        response = make_request(:post, endpoint("orders/#{order_id}/discounts"), payload)
+
+        if response && response["id"]
+          logger.info "✅ Successfully applied discount ID #{discount_id} to order #{order_id}"
+        else
+          logger.error "❌ ERROR: Failed to apply discount #{discount_id} to order #{order_id}. Response: #{response.inspect}"
+        end
+
+        response
       end
 
       def add_modification(order_id, line_item_id, modifier_id)
@@ -339,83 +367,60 @@ module CloverRestaurant
         make_request(:post, endpoint("orders/#{order_id}/line_items/#{line_item_id}"), { "note" => note })
       end
 
-      def create_random_order(items, employee_id = nil, customer_id = nil, options = {})
-        logger.info "=== Creating random order ==="
+      def create_random_order(items, discounts = [], modifiers = [], employees = [], customers = [], options = {})
+        logger.info "=== Creating random order efficiently ==="
 
-        # Create a new order
         order_data = {}
-        order_data["employee"] = { "id" => employee_id } if employee_id
+        employee = employees.sample
+        order_data["employee"] = { "id" => employee["id"] } if employee
 
         order = create_order(order_data)
-
-        unless order && order["id"]
-          logger.error "Failed to create order"
-          return nil
-        end
+        return nil unless order && order["id"]
 
         order_id = order["id"]
+        customer = customers.sample
+        add_customer_to_order(order_id, customer["id"]) if customer
 
-        # Add customer if provided
-        add_customer_to_order(order_id, customer_id) if customer_id
-
-        # Set dining option deterministically instead of randomly
-        dining_option = options[:dining_option] || (order_id.hash.abs.even? ? "HERE" : "TO_GO")
+        # Deterministic dining option
+        dining_option = options[:dining_option] || (order_id.hash.even? ? "HERE" : "TO_GO")
         set_dining_option(order_id, dining_option)
 
-        # Add deterministic number of items instead of random
-        num_items = options[:num_items] || (order_id.hash.abs % 5) + 1 # 1-5 items
+        # Select deterministic number of items (1-5)
+        num_items = options[:num_items] || (order_id.hash % 5) + 1
+        selected_items = items.sample(num_items)
 
-        # Select items deterministically
-        item_indices = []
-        for i in 0..(num_items - 1)
-          item_indices << ((order_id.hash.abs + i) % items.size)
+        # Batch-create line items
+        line_items_data = selected_items.map.with_index do |item, index|
+          quantity = ((order_id.hash + index) % 3) + 1
+          {
+            "item" => { "id" => item["id"] },
+            "quantity" => quantity
+          }
         end
+        batch_add_line_items(order_id, line_items_data)
 
-        selected_items = item_indices.map { |idx| items[idx] }
-
-        selected_items.each_with_index do |item, index|
-          # Deterministic quantity
-          quantity = ((order_id.hash.abs + index) % 3) + 1 # 1-3 quantity
-
-          line_item = add_line_item(order_id, item["id"], quantity)
-
-          # Add note deterministically
-          next unless (order_id.hash.abs + index) % 10 < 3 # 30% chance
-
-          notes = ["Extra hot", "No onions", "On the side", "Light sauce", "Well done"]
-          note_idx = (order_id.hash.abs + index) % notes.size
-          add_note_to_line_item(order_id, line_item["id"], notes[note_idx])
-
-          # TODO: Consider adding modifications with similar deterministic approach
-        end
-
-        # Add discount deterministically
-        if order_id.hash.abs % 10 < 4 # 40% chance
-          discount_service = DiscountService.new(@config)
-          discounts = discount_service.get_discounts
-
-          if discounts && discounts["elements"] && !discounts["elements"].empty?
-            discount_idx = order_id.hash.abs % discounts["elements"].size
-            discount = discounts["elements"][discount_idx]
-
-            discount_data = { "discount" => { "id" => discount["id"] } }
-            add_discount(order_id, discount_data)
-          end
+        # Apply discounts (40% chance)
+        if order_id.hash % 10 < 4 && !discounts.empty?
+          discount = discounts.sample
+          apply_discount(order_id, discount["id"])
         end
 
         # Calculate and update total
         total = calculate_order_total(order_id)
         update_order_total(order_id, total)
 
-        # Add order note deterministically
-        if order_id.hash.abs % 10 < 3 # 30% chance
-          notes = ["Birthday celebration", "Anniversary", "Please deliver ASAP", "Call on arrival"]
-          note_idx = order_id.hash.abs % notes.size
-          add_note_to_order(order_id, notes[note_idx])
-        end
+        # Order note (30% chance)
+        notes = ["Birthday celebration", "Anniversary", "Please deliver ASAP", "Call on arrival"]
+        add_note_to_order(order_id, notes.sample) if order_id.hash % 10 < 3
 
-        # Return the completed order
+        # Return completed order
         get_order(order_id)
+      end
+
+      # 🚀 Optimized: Batch add line items
+      def batch_add_line_items(order_id, line_items_data)
+        logger.info "=== Batch adding #{line_items_data.size} items to order #{order_id} ==="
+        make_request(:post, endpoint("orders/#{order_id}/line_items"), { "elements" => line_items_data })
       end
     end
   end

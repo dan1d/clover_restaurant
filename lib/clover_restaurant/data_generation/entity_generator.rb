@@ -16,7 +16,7 @@ module CloverRestaurant
           table: ::CloverRestaurant::Services::TableService.new(@config),
           menu: ::CloverRestaurant::Services::MenuService.new(@config),
           discount: ::CloverRestaurant::Services::DiscountService.new(@config),
-          tax: ::CloverRestaurant::Services::TaxRateService.new(@config)
+          tax: ::CloverRestaurant::Services::TaxService.new(@config)
         }
 
         # Cache for entities to avoid redundant API calls

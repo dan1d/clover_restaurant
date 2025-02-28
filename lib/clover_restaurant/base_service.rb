@@ -41,11 +41,11 @@ module CloverRestaurant
       # Generate a unique cache key for this request
       cassette_name = generate_cassette_name(method, url, payload)
 
-      logger.info "Using VCR Cassette: #{cassette_name}"
+      # logger.info "Using VCR Cassette: #{cassette_name}"
 
-      response = VCR.use_cassette(cassette_name) do
-        send_http_request(method, url, payload)
-      end
+      # response = VCR.use_cassette(cassette_name) do
+      response = send_http_request(method, url, payload)
+      # end
 
       handle_response(response)
     end
