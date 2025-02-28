@@ -1,16 +1,22 @@
 #!/usr/bin/env ruby
 # simulate_restaurant.rb - Runs a restaurant simulation with configurable parameters
 # and generates detailed analytics reports
+#
+# Usage examples:
+#   ruby simulate_restaurant.rb -n "Thai Express" -d 30
+#   ruby simulate_restaurant.rb --export --format json
+#   ruby simulate_restaurant.rb --start-date 2025-01-01 --verbose
 
 # Add the local lib directory to the load path
 $LOAD_PATH.unshift(File.expand_path("lib", __dir__))
 
 require "clover_restaurant"
 begin
-  require "dotenv/load"
-rescue StandardError
+  require "dotenv/load" # Load environment variables from .env file
+rescue LoadError
   puts "dotenv gem not found, skipping .env file loading"
-end # Load environment variables from .env file
+end
+
 require "date"
 require "terminal-table"
 require "colorize"
@@ -19,6 +25,7 @@ require "optparse"
 require "json"
 require "csv"
 require "fileutils"
+require "set" # Required for Set data structure used in analytics
 
 class RestaurantSimulator
   attr_reader :options, :restaurant_generator, :results
@@ -28,6 +35,9 @@ class RestaurantSimulator
     configure_clover
     @restaurant_generator = CloverRestaurant::DataGeneration::RestaurantGenerator.new
     @results = { summary: {} }
+
+    # Make sure the VCR directory exists for caching requests
+    FileUtils.mkdir_p("tmp/vcr_cassettes") unless Dir.exist?("tmp/vcr_cassettes")
   end
 
   def run
@@ -193,27 +203,38 @@ class RestaurantSimulator
     return if restaurant_generator.data[:days].empty?
 
     begin
+      analytics_generator = CloverRestaurant::DataGeneration::AnalyticsGenerator.new
+
       @results = {
-        summary: CloverRestaurant::DataGeneration::AnalyticsGenerator.new.generate_period_summary(
+        summary: analytics_generator.generate_period_summary(
           restaurant_generator.data[:days],
           options[:start_date],
           options[:days]
         )
       }
 
-      # Generate additional reports if needed
-      analytics = CloverRestaurant::DataGeneration::AnalyticsGenerator.new
-
-      if analytics.respond_to?(:generate_sales_report)
-        @results[:sales_report] = analytics.generate_sales_report(
+      # Generate additional reports if available in the AnalyticsGenerator
+      if analytics_generator.respond_to?(:generate_sales_report)
+        puts "Generating detailed sales report...".colorize(:light_blue) if options[:verbose]
+        @results[:sales_report] = analytics_generator.generate_sales_report(
           restaurant_generator.data[:days],
           options[:start_date],
           options[:start_date] + options[:days] - 1
         )
       end
 
-      if analytics.respond_to?(:generate_item_sales_report)
-        @results[:item_sales] = analytics.generate_item_sales_report(
+      if analytics_generator.respond_to?(:generate_item_sales_report)
+        puts "Generating item sales report...".colorize(:light_blue) if options[:verbose]
+        @results[:item_sales] = analytics_generator.generate_item_sales_report(
+          restaurant_generator.data[:days],
+          options[:start_date],
+          options[:start_date] + options[:days] - 1
+        )
+      end
+
+      # Add a function to generate employee performance report if not already present
+      unless analytics_generator.respond_to?(:generate_employee_report)
+        @results[:employee_report] = generate_employee_performance_report(
           restaurant_generator.data[:days],
           options[:start_date],
           options[:start_date] + options[:days] - 1
@@ -223,6 +244,60 @@ class RestaurantSimulator
       puts "\nERROR generating analytics: #{e.message}".colorize(:red)
       puts e.backtrace.join("\n").colorize(:red) if options[:verbose]
     end
+  end
+
+  # Custom method to generate employee performance report
+  def generate_employee_performance_report(days_data, start_date, end_date)
+    puts "Generating employee performance report...".colorize(:light_blue) if options[:verbose]
+
+    # Filter data to date range
+    filtered_days = days_data.select { |day| day[:date] >= start_date && day[:date] <= end_date }
+
+    # Initialize report
+    report = {
+      period: {
+        start_date: start_date,
+        end_date: end_date,
+        days: (end_date - start_date + 1).to_i
+      },
+      employees: {},
+      top_performers: [],
+      daily_breakdown: {}
+    }
+
+    # Process each day
+    filtered_days.each do |day|
+      next unless day[:date]
+
+      # Track employee performance
+      day[:employee_orders].each do |employee_name, order_count|
+        report[:employees][employee_name] ||= {
+          total_orders: 0,
+          total_revenue: 0,
+          avg_revenue_per_order: 0,
+          days_worked: 0
+        }
+
+        report[:employees][employee_name][:total_orders] += order_count
+        report[:employees][employee_name][:days_worked] += 1
+
+        # Track daily breakdown
+        date_key = day[:date].to_s
+        report[:daily_breakdown][date_key] ||= {}
+        report[:daily_breakdown][date_key][employee_name] = order_count
+      end
+    end
+
+    # Calculate additional metrics and sort employees by performance
+    report[:employees].each do |name, data|
+      # Calculate average metrics
+      data[:avg_orders_per_day] = (data[:total_orders].to_f / data[:days_worked]).round(2) if data[:total_orders] > 0
+    end
+
+    # Get top performers by total orders
+    report[:top_performers] = report[:employees].sort_by { |_, data| -data[:total_orders] }.first(5)
+
+    report
   end
 
   def display_results
@@ -236,6 +311,7 @@ class RestaurantSimulator
     # Business Overview
     puts "BUSINESS OVERVIEW:".colorize(:light_blue)
     overview_table = Terminal::Table.new do |t|
+      t.title = "Business Summary"
       t.style = { border_x: "-", border_i: "+", border_y: "|" }
       t.add_row ["Period", "#{summary[:period_start]} to #{summary[:period_end]} (#{summary[:total_days]} days)"]
       t.add_row ["Total Orders", summary[:total_orders]]
@@ -252,6 +328,7 @@ class RestaurantSimulator
     # Top Selling Items
     puts "\nTOP SELLING ITEMS:".colorize(:light_blue)
     top_items_table = Terminal::Table.new do |t|
+      t.title = "Best Sellers"
       t.headings = ["Item", "Quantity Sold"]
       t.style = { border_x: "-", border_i: "+", border_y: "|" }
 
@@ -264,6 +341,7 @@ class RestaurantSimulator
     # Top Employees
     puts "\nTOP EMPLOYEES BY ORDERS:".colorize(:light_blue)
     top_employees_table = Terminal::Table.new do |t|
+      t.title = "Employee Performance"
       t.headings = ["Employee", "Orders Processed"]
       t.style = { border_x: "-", border_i: "+", border_y: "|" }
 
@@ -273,6 +351,26 @@ class RestaurantSimulator
     end
     puts top_employees_table
 
+    # Display employee performance report if available
+    if results[:employee_report] && !results[:employee_report][:top_performers].empty?
+      puts "\nDETAILED EMPLOYEE METRICS:".colorize(:light_blue)
+      employee_metrics_table = Terminal::Table.new do |t|
+        t.title = "Employee Detailed Metrics"
+        t.headings = ["Employee", "Orders", "Days Worked", "Avg Orders/Day"]
+        t.style = { border_x: "-", border_i: "+", border_y: "|" }
+
+        results[:employee_report][:top_performers].each do |name, data|
+          t.add_row [
+            name,
+            data[:total_orders],
+            data[:days_worked],
+            data[:avg_orders_per_day]
+          ]
+        end
+      end
+      puts employee_metrics_table
+    end
+
     # Daily Revenue Chart (simple text-based chart)
     puts "\nDAILY REVENUE CHART:".colorize(:light_blue)
     daily_revenue = summary[:daily_revenue]
@@ -280,6 +378,10 @@ class RestaurantSimulator
     # Find max revenue for scaling
     max_revenue = daily_revenue.map { |day| day[:revenue] }.max.to_f
     chart_width = 50
+
+    # Print chart header
+    puts "Date         " + "Revenue".rjust(chart_width + 11)
+    puts "------------" + "-" * (chart_width + 11)
 
     daily_revenue.each do |day|
       date_str = day[:date].to_s
@@ -296,11 +398,13 @@ class RestaurantSimulator
       bar_part = "█" * bar_length
       revenue_part = currency_format(revenue).rjust(10)
 
-      # Add a different color for weekend days
-      line_color = if day[:date].saturday? || day[:date].sunday?
-                     :light_yellow
+      # Add a different color for weekend days and special color for highest revenue day
+      line_color = if day[:date].to_s == summary[:busiest_day]
+                     :light_green # Highlight busiest day
+                   elsif day[:date].saturday? || day[:date].sunday?
+                     :light_yellow # Weekend
                    else
-                     :white
+                     :white        # Weekday
                    end
 
       puts "#{date_part} #{bar_part} #{revenue_part}".colorize(line_color)
@@ -337,13 +441,16 @@ class RestaurantSimulator
   def export_json(base_filename)
     # Export summary
     File.open(File.join(options[:export_dir], "#{base_filename}_summary.json"), "w") do |f|
-      f.write(JSON.pretty_generate(results[:summary]))
+      # Convert any Set objects to arrays for JSON serialization
+      cleaned_summary = deep_clean_for_json(results[:summary])
+      f.write(JSON.pretty_generate(cleaned_summary))
     end
 
     # Export sales report if available
     if results[:sales_report]
       File.open(File.join(options[:export_dir], "#{base_filename}_sales_report.json"), "w") do |f|
-        f.write(JSON.pretty_generate(results[:sales_report]))
+        cleaned_report = deep_clean_for_json(results[:sales_report])
+        f.write(JSON.pretty_generate(cleaned_report))
       end
     end
 
@@ -351,7 +458,26 @@ class RestaurantSimulator
     return unless results[:item_sales]
 
     File.open(File.join(options[:export_dir], "#{base_filename}_item_sales.json"), "w") do |f|
-      f.write(JSON.pretty_generate(results[:item_sales]))
+      cleaned_item_sales = deep_clean_for_json(results[:item_sales])
+      f.write(JSON.pretty_generate(cleaned_item_sales))
+    end
+  end
+
+  # Helper method to prepare data for JSON by converting any Set objects to arrays
+  def deep_clean_for_json(obj)
+    case obj
+    when Set
+      obj.to_a
+    when Hash
+      result = {}
+      obj.each do |k, v|
+        result[k] = deep_clean_for_json(v)
+      end
+      result
+    when Array
+      obj.map { |item| deep_clean_for_json(item) }
+    else
+      obj
     end
   end
 
