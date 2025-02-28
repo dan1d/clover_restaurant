@@ -1,6 +1,5 @@
 # lib/clover_restaurant/services/data_generation/entity_generator.rb
 require_relative "base_generator"
-require_relative "../services/inventory_service"
 
 module CloverRestaurant
   module DataGeneration
@@ -19,56 +18,233 @@ module CloverRestaurant
           discount: ::CloverRestaurant::Services::DiscountService.new(@config),
           tax: ::CloverRestaurant::Services::TaxRateService.new(@config)
         }
+
+        # Cache for entities to avoid redundant API calls
+        @entity_cache = {}
       end
 
-      # Rest of the class remains the same
+      # Improved methods with existence checks
       def create_inventory
-        log_info("Creating inventory...")
-        services[:inventory].create_random_restaurant_inventory(7, 15)
+        log_info("Checking for existing inventory...")
+        existing_items = fetch_with_cache(:inventory_items) do
+          services[:inventory].get_items(limit: 100)
+        end
+
+        existing_categories = fetch_with_cache(:inventory_categories) do
+          services[:inventory].get_categories(limit: 100)
+        end
+
+        if existing_items && existing_items["elements"] && !existing_items["elements"].empty? &&
+           existing_categories && existing_categories["elements"] && !existing_categories["elements"].empty?
+          log_info("Found #{existing_items["elements"].size} existing inventory items and #{existing_categories["elements"].size} categories, skipping creation")
+          {
+            categories: existing_categories["elements"],
+            items: existing_items["elements"]
+          }
+        else
+          log_info("Creating inventory...")
+          services[:inventory].create_random_restaurant_inventory(7, 15)
+        end
       end
 
       def create_modifier_groups(items)
-        log_info("Creating modifier groups...")
-        modifier_groups = services[:modifier].create_common_modifier_groups
-        services[:modifier].assign_appropriate_modifiers_to_items(items)
+        log_info("Checking for existing modifier groups...")
+        existing_groups = fetch_with_cache(:modifier_groups) do
+          services[:modifier].get_modifier_groups(limit: 100)
+        end
+
+        if existing_groups && existing_groups["elements"] && existing_groups["elements"].size >= 5
+          log_info("Found #{existing_groups["elements"].size} existing modifier groups, skipping creation")
+          modifier_groups = existing_groups["elements"]
+        else
+          log_info("Creating modifier groups...")
+          modifier_groups = services[:modifier].create_common_modifier_groups
+        end
+
+        # Check if modifiers are already assigned to items
+        log_info("Checking for existing modifier assignments...")
+        item_sample = items.first(3)
+
+        needs_assignment = item_sample.any? do |item|
+          item_modifiers = services[:modifier].get_item_modifier_groups(item["id"])
+          !item_modifiers || !item_modifiers["elements"] || item_modifiers["elements"].empty?
+        end
+
+        if needs_assignment
+          log_info("Assigning modifiers to items...")
+          services[:modifier].assign_appropriate_modifiers_to_items(items)
+        else
+          log_info("Items already have modifiers assigned, skipping assignment")
+        end
+
         modifier_groups
       end
 
       def create_tax_rates(categories)
-        log_info("Creating tax rates...")
-        tax_rates = services[:tax].create_standard_tax_rates
-        services[:tax].assign_category_tax_rates(categories, tax_rates)
+        log_info("Checking for existing tax rates...")
+        existing_tax_rates = fetch_with_cache(:tax_rates) do
+          services[:tax].get_tax_rates(limit: 100)
+        end
+
+        if existing_tax_rates && existing_tax_rates["elements"] && !existing_tax_rates["elements"].empty?
+          log_info("Found #{existing_tax_rates["elements"].size} existing tax rates, skipping creation")
+          tax_rates = existing_tax_rates["elements"]
+        else
+          log_info("Creating tax rates...")
+          tax_rates = services[:tax].create_standard_tax_rates
+        end
+
+        # Check if categories already have tax rates assigned
+        log_info("Checking if tax rates need to be assigned to categories...")
+        if categories.empty?
+          log_info("No categories to assign tax rates to")
+          return tax_rates
+        end
+
+        # Sample a category to check if it has items with tax rates
+        sample_category = categories.first
+
+        category_items = fetch_with_cache("category_items_#{sample_category["id"]}") do
+          services[:inventory].get_category_items(sample_category["id"])
+        end
+
+        if category_items && category_items["elements"] && !category_items["elements"].empty?
+          # Check if a sample item has tax rates
+          sample_item = category_items["elements"].first
+          item_tax_rates = services[:tax].get_item_tax_rates(sample_item["id"])
+
+          if !item_tax_rates || !item_tax_rates["elements"] || item_tax_rates["elements"].empty?
+            log_info("Assigning tax rates to categories...")
+            services[:tax].assign_category_tax_rates(categories, tax_rates)
+          else
+            log_info("Items already have tax rates assigned, skipping assignment")
+          end
+        end
+
         tax_rates
       end
 
       def create_discounts
-        log_info("Creating discounts...")
-        services[:discount].create_standard_discounts
+        log_info("Checking for existing discounts...")
+        existing_discounts = fetch_with_cache(:discounts) do
+          services[:discount].get_discounts(limit: 100)
+        end
+
+        if existing_discounts && existing_discounts["elements"] && !existing_discounts["elements"].empty?
+          log_info("Found #{existing_discounts["elements"].size} existing discounts, skipping creation")
+          existing_discounts["elements"]
+        else
+          log_info("Creating discounts...")
+          services[:discount].create_standard_discounts
+        end
       end
 
       def create_employees_and_roles
-        log_info("Creating employees and roles...")
-        roles = services[:employee].create_standard_restaurant_roles
-        employees = services[:employee].create_random_employees(15, roles)
+        log_info("Checking for existing roles...")
+        existing_roles = fetch_with_cache(:roles) do
+          services[:employee].get_roles(limit: 100)
+        end
+
+        if existing_roles && existing_roles["elements"] && !existing_roles["elements"].empty?
+          log_info("Found #{existing_roles["elements"].size} existing roles, skipping creation")
+          roles = existing_roles["elements"]
+        else
+          log_info("Creating employee roles...")
+          roles = services[:employee].create_standard_restaurant_roles
+        end
+
+        log_info("Checking for existing employees...")
+        existing_employees = fetch_with_cache(:employees) do
+          services[:employee].get_employees(limit: 100)
+        end
+
+        if existing_employees && existing_employees["elements"] && existing_employees["elements"].size >= 5
+          log_info("Found #{existing_employees["elements"].size} existing employees, skipping creation")
+          employees = existing_employees["elements"]
+        else
+          log_info("Creating employees...")
+          employees = services[:employee].create_random_employees(15, roles)
+        end
+
         [roles, employees]
       end
 
       def create_customers(count = 50)
-        log_info("Creating #{count} customers...")
-        services[:customer].create_random_customers(count)
+        log_info("Checking for existing customers...")
+        existing_customers = fetch_with_cache(:customers) do
+          services[:customer].get_customers(limit: 100)
+        end
+
+        if existing_customers && existing_customers["elements"] && existing_customers["elements"].size >= count / 2
+          log_info("Found #{existing_customers["elements"].size} existing customers, skipping creation")
+          existing_customers["elements"]
+        else
+          log_info("Creating #{count} customers...")
+          services[:customer].create_random_customers(count)
+        end
       end
 
       def create_table_layout(name = "Main Restaurant")
+        log_info("Checking for existing table layouts...")
+        existing_floor_plans = fetch_with_cache(:floor_plans) do
+          services[:table].get_floor_plans(limit: 100)
+        end
+
+        if existing_floor_plans && existing_floor_plans["elements"] &&
+           existing_floor_plans["elements"].any? { |plan| plan["name"] == name }
+          log_info("Found existing floor plan '#{name}', checking for tables")
+
+          existing_tables = fetch_with_cache(:tables) do
+            services[:table].get_tables(limit: 100)
+          end
+
+          if existing_tables && existing_tables["elements"] && !existing_tables["elements"].empty?
+            log_info("Found #{existing_tables["elements"].size} existing tables, skipping creation")
+            return {
+              "floorPlan" => existing_floor_plans["elements"].find { |plan| plan["name"] == name },
+              "tables" => existing_tables["elements"]
+            }
+          end
+        end
+
         log_info("Creating table layout: #{name}")
         services[:table].create_standard_restaurant_layout(name)
       end
 
       def create_menus(categories, items)
-        log_info("Creating menus...")
-        standard_menu = services[:menu].create_standard_menu("Main Menu", categories, items)
-        time_menus = services[:menu].create_time_based_menus(items)
-        [standard_menu] + time_menus
+        log_info("Checking for existing menus...")
+        existing_menus = fetch_with_cache(:menus) do
+          services[:menu].get_menus(limit: 100)
+        end
+
+        if existing_menus && existing_menus["elements"] && !existing_menus["elements"].empty?
+          log_info("Found #{existing_menus["elements"].size} existing menus, skipping creation")
+          existing_menus["elements"]
+        else
+          log_info("Creating menus...")
+          standard_menu = services[:menu].create_standard_menu("Main Menu", categories, items)
+          time_menus = services[:menu].create_time_based_menus(items)
+          [standard_menu] + time_menus.compact
+        end
       end
+
+      private
+
+      # Helper method to fetch with caching to reduce API calls
+      def fetch_with_cache(key, &block)
+        return @entity_cache[key] if @entity_cache.key?(key)
+
+        begin
+          result = block.call
+          @entity_cache[key] = result if result
+          result
+        rescue StandardError => e
+          log_error("Error fetching #{key}: #{e.message}")
+          nil
+        end
+      end
+
+      attr_reader :services
     end
   end
 end

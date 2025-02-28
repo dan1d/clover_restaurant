@@ -3,12 +3,12 @@ module CloverRestaurant
   module Services
     class TipService < BaseService
       def get_tips(limit = 100, offset = 0)
-        logger.info "Fetching tips for merchant #{@config.merchant_id}"
+        logger.info "=== Fetching tips for merchant #{@config.merchant_id} ==="
         make_request(:get, endpoint("payments"), nil, { filter: "tipAmount>0", limit: limit, offset: offset })
       end
 
       def get_tips_by_employee(employee_id, start_date = nil, end_date = nil)
-        logger.info "Fetching tips for employee #{employee_id}"
+        logger.info "=== Fetching tips for employee #{employee_id} ==="
 
         filter = "tipAmount>0 AND employee.id=#{employee_id}"
 
@@ -26,21 +26,37 @@ module CloverRestaurant
       end
 
       def add_tip_to_payment(payment_id, tip_amount)
-        logger.info "Adding tip of #{tip_amount} to payment #{payment_id}"
+        logger.info "=== Adding tip of #{tip_amount} to payment #{payment_id} ==="
+
+        # Check if payment already has this tip amount
+        payment = get_payment(payment_id)
+        if payment && payment["tipAmount"] == tip_amount
+          logger.info "Payment #{payment_id} already has tip amount #{tip_amount}, skipping"
+          return payment
+        end
+
         make_request(:post, endpoint("payments/#{payment_id}"), {
                        "tipAmount" => tip_amount.to_i
                      })
       end
 
       def adjust_tip(payment_id, tip_amount)
-        logger.info "Adjusting tip to #{tip_amount} for payment #{payment_id}"
+        logger.info "=== Adjusting tip to #{tip_amount} for payment #{payment_id} ==="
+
+        # Check if payment already has this tip amount
+        payment = get_payment(payment_id)
+        if payment && payment["tipAmount"] == tip_amount
+          logger.info "Payment #{payment_id} already has tip amount #{tip_amount}, skipping"
+          return payment
+        end
+
         make_request(:post, endpoint("payments/#{payment_id}/tip"), {
                        "tipAmount" => tip_amount.to_i
                      })
       end
 
       def calculate_tip_suggestions(amount, percentages = [15, 18, 20, 25])
-        logger.info "Calculating tip suggestions for amount #{amount}"
+        logger.info "=== Calculating tip suggestions for amount #{amount} ==="
 
         suggestions = {}
 
@@ -59,7 +75,7 @@ module CloverRestaurant
       end
 
       def generate_tip_report(start_date = nil, end_date = nil)
-        logger.info "Generating tip report"
+        logger.info "=== Generating tip report ==="
 
         # Default to current month if dates not provided
         start_date ||= Date.today.beginning_of_month
@@ -182,10 +198,21 @@ module CloverRestaurant
       end
 
       def add_automatic_gratuity(order_id, percentage = 18, min_party_size = 6)
-        logger.info "Adding automatic gratuity to order #{order_id}"
+        logger.info "=== Adding automatic gratuity to order #{order_id} ==="
+
+        # Check if gratuity has already been added
+        order_service = OrderService.new(@config)
+        service_charges = order_service.get_service_charges(order_id)
+
+        if service_charges && service_charges["elements"]
+          gratuity_charge = service_charges["elements"].find { |sc| sc["name"] && sc["name"].include?("Gratuity") }
+          if gratuity_charge
+            logger.info "Automatic gratuity already added to order #{order_id}, skipping"
+            return gratuity_charge
+          end
+        end
 
         # Get the order
-        order_service = OrderService.new(@config)
         order = order_service.get_order(order_id)
 
         return false unless order
@@ -218,14 +245,23 @@ module CloverRestaurant
           "percentage" => percentage
         }
 
+        logger.info "Adding gratuity service charge: #{service_charge_data.inspect}"
         order_service.add_service_charge(order_id, service_charge_data)
       end
 
       def split_tip_among_employees(payment_id, employee_ids, distribution = nil)
-        logger.info "Splitting tip for payment #{payment_id} among #{employee_ids.length} employees"
+        logger.info "=== Splitting tip for payment #{payment_id} among #{employee_ids.length} employees ==="
+
+        # Check if tip has already been split
+        payment = get_payment(payment_id)
+        if payment && payment["tipDistributions"] && payment["tipDistributions"]["elements"] &&
+           payment["tipDistributions"]["elements"].length == employee_ids.length
+          logger.info "Tip for payment #{payment_id} has already been split, skipping"
+          return payment["tipDistributions"]["elements"]
+        end
 
         # Get the payment
-        payment = make_request(:get, endpoint("payments/#{payment_id}"))
+        payment ||= make_request(:get, endpoint("payments/#{payment_id}"))
 
         return false unless payment && payment["tipAmount"]
 
@@ -266,19 +302,30 @@ module CloverRestaurant
         end
 
         # Record tip distributions
+        distributions = []
+
         employee_ids.each_with_index do |employee_id, index|
           next if amounts[index] <= 0
 
           # Create a record of this tip distribution
-          make_request(:post, endpoint("tip_distributions"), {
-                         "payment" => { "id" => payment_id },
-                         "employee" => { "id" => employee_id },
-                         "amount" => amounts[index],
-                         "note" => "Split tip (#{index + 1}/#{employee_ids.length})"
-                       })
+          distribution = make_request(:post, endpoint("tip_distributions"), {
+                                        "payment" => { "id" => payment_id },
+                                        "employee" => { "id" => employee_id },
+                                        "amount" => amounts[index],
+                                        "note" => "Split tip (#{index + 1}/#{employee_ids.length})"
+                                      })
+
+          distributions << distribution if distribution
         end
 
-        true
+        distributions
+      end
+
+      private
+
+      def get_payment(payment_id)
+        logger.info "=== Fetching payment #{payment_id} ==="
+        make_request(:get, endpoint("payments/#{payment_id}"))
       end
     end
   end

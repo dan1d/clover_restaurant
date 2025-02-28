@@ -10,14 +10,34 @@ require "active_support/time"
 # Base and core components
 require_relative "clover_restaurant/version"
 require_relative "clover_restaurant/configuration"
+require_relative "clover_restaurant/vcr_setup"
 require_relative "clover_restaurant/errors"
 require_relative "clover_restaurant/base_service"
 require_relative "clover_restaurant/payment_encryptor"
+require_relative "clover_restaurant/clover_services_manager"
 
 # Services
-require_relative "clover_restaurant/services/index"
+require "clover_restaurant/base_service"
+require "clover_restaurant/services/merchant_service"
+require "clover_restaurant/services/order_service"
+require "clover_restaurant/services/payment_service"
+require "clover_restaurant/services/tax_rate_service"
+require "clover_restaurant/services/discount_service"
+require "clover_restaurant/services/employee_service"
+require "clover_restaurant/services/customer_service"
+require "clover_restaurant/services/table_service"
+require "clover_restaurant/services/menu_service"
+require "clover_restaurant/services/inventory_service"
+require "clover_restaurant/services/modifier_service"
+require "clover_restaurant/services/refund_service"
+require "clover_restaurant/services/reservation_service"
+require "clover_restaurant/services/tip_service"
 # Data Generation (adjust paths to match your structure)
-require_relative "clover_restaurant/data_generation/index"
+require "clover_restaurant/data_generation/base_generator"
+require "clover_restaurant/data_generation/entity_generator"
+require "clover_restaurant/data_generation/restaurant_generator"
+require "clover_restaurant/data_generation/daily_operation_generator"
+
 module CloverRestaurant
   class << self
     attr_accessor :configuration

@@ -17,6 +17,20 @@ module CloverRestaurant
 
       def create_employee(employee_data)
         logger.info "=== Creating new employee for merchant #{@config.merchant_id} ==="
+
+        # Check if employee with same name or PIN already exists
+        existing_employees = get_employees
+        if existing_employees && existing_employees["elements"]
+          existing_employee = existing_employees["elements"].find do |emp|
+            emp["name"] == employee_data["name"] || (emp["pin"] && employee_data["pin"] && emp["pin"] == employee_data["pin"])
+          end
+
+          if existing_employee
+            logger.info "Employee with name '#{employee_data["name"]}' or PIN '#{employee_data["pin"]}' already exists, skipping creation"
+            return existing_employee
+          end
+        end
+
         logger.info "Employee data: #{employee_data.inspect}"
         make_request(:post, endpoint("employees"), employee_data)
       end
@@ -44,6 +58,16 @@ module CloverRestaurant
 
       def create_role(role_data)
         logger.info "=== Creating new role for merchant #{@config.merchant_id} ==="
+
+        # Check if role with the same name already exists
+        existing_roles = get_roles
+        if existing_roles && existing_roles["elements"]
+          existing_role = existing_roles["elements"].find { |r| r["name"] == role_data["name"] }
+          if existing_role
+            logger.info "Role '#{role_data["name"]}' already exists with ID: #{existing_role["id"]}, skipping creation"
+            return existing_role
+          end
+        end
 
         # IMPORTANT: Add systemRole field if not present
         unless role_data.has_key?("systemRole")
@@ -89,6 +113,14 @@ module CloverRestaurant
 
       def assign_role_to_employee(employee_id, role_id)
         logger.info "=== Assigning role #{role_id} to employee #{employee_id} ==="
+
+        # Check if employee already has this role
+        employee = get_employee(employee_id)
+        if employee && employee["role"] && employee["role"]["id"] == role_id
+          logger.info "Employee #{employee_id} already has role #{role_id}, skipping assignment"
+          return true
+        end
+
         payload = {
           "role" => { "id" => role_id }
         }
@@ -103,6 +135,29 @@ module CloverRestaurant
 
       def create_shift(shift_data)
         logger.info "=== Creating new shift ==="
+
+        # Check if a similar shift already exists
+        if shift_data["employee"] && shift_data["employee"]["id"] && shift_data["inTime"]
+          employee_id = shift_data["employee"]["id"]
+          in_time = shift_data["inTime"]
+
+          # Get existing shifts for this employee
+          shifts = get_employee_shifts(employee_id)
+
+          if shifts && shifts["elements"]
+            # Check for shifts with similar in times (within 15 minutes)
+            fifteen_minutes_ms = 15 * 60 * 1000
+            existing_shift = shifts["elements"].find do |shift|
+              shift["inTime"] && (shift["inTime"] - in_time).abs < fifteen_minutes_ms
+            end
+
+            if existing_shift
+              logger.info "Similar shift already exists for employee #{employee_id} with ID: #{existing_shift["id"]}, skipping creation"
+              return existing_shift
+            end
+          end
+        end
+
         logger.info "Shift data: #{shift_data.inspect}"
         make_request(:post, endpoint("shifts"), shift_data)
       end
@@ -125,6 +180,17 @@ module CloverRestaurant
 
       def clock_in(employee_id)
         logger.info "=== Clocking in employee #{employee_id} ==="
+
+        # Check if employee is already clocked in
+        shifts = get_employee_shifts(employee_id)
+        if shifts && shifts["elements"]
+          active_shift = shifts["elements"].find { |shift| shift["inTime"] && !shift["outTime"] }
+          if active_shift
+            logger.info "Employee #{employee_id} already has an active shift with ID: #{active_shift["id"]}, skipping clock-in"
+            return active_shift
+          end
+        end
+
         current_time = Time.now.to_i * 1000 # Milliseconds since epoch
 
         shift_data = {
@@ -138,6 +204,14 @@ module CloverRestaurant
 
       def clock_out(shift_id)
         logger.info "=== Clocking out shift #{shift_id} ==="
+
+        # Check if shift is already clocked out
+        shift = get_shift(shift_id)
+        if shift && shift["outTime"]
+          logger.info "Shift #{shift_id} is already clocked out, skipping"
+          return shift
+        end
+
         current_time = Time.now.to_i * 1000 # Milliseconds since epoch
 
         shift_data = {
@@ -167,6 +241,19 @@ module CloverRestaurant
 
       def create_standard_restaurant_roles
         logger.info "=== Creating standard restaurant roles ==="
+
+        # Check for existing roles first
+        existing_roles = get_roles
+        if existing_roles && existing_roles["elements"] && existing_roles["elements"].size >= 3
+          standard_names = ["Manager", "Server", "Bartender", "Host", "Kitchen Staff"]
+
+          existing_standard = existing_roles["elements"].select { |r| standard_names.include?(r["name"]) }
+
+          if existing_standard.size >= 3
+            logger.info "Found #{existing_standard.size} standard roles already existing, skipping creation"
+            return existing_standard
+          end
+        end
 
         standard_roles = [
           {
@@ -256,6 +343,13 @@ module CloverRestaurant
       def create_random_employees(num_employees = 5, roles = nil)
         logger.info "=== Creating #{num_employees} random employees ==="
 
+        # Check for existing employees first
+        existing_employees = get_employees
+        if existing_employees && existing_employees["elements"] && existing_employees["elements"].size >= num_employees
+          logger.info "Found #{existing_employees["elements"].size} existing employees, skipping creation"
+          return existing_employees["elements"].first(num_employees)
+        end
+
         # Get roles first if not provided
         if roles.nil? || roles.empty?
           logger.info "No roles provided, fetching available roles"
@@ -290,23 +384,22 @@ module CloverRestaurant
         }
 
         num_employees.times do |i|
-          # Generate random 4-digit PIN
-          pin = rand(1000..9999).to_s
+          # Generate deterministic 4-digit PIN instead of random
+          pin = (1000 + i).to_s
 
-          # Select random role
-          role = roles.sample
+          # Select role deterministically based on index
+          role_index = i % roles.size
+          role = roles[role_index]
 
           # Generate name
-          first_name = "FirstName#{i + 1}" # Using predictable names instead of Faker
+          first_name = "FirstName#{i + 1}" # Using predictable names
           last_name = "LastName#{i + 1}"
 
           # Determine job title based on role name
           role_name = role["name"]
-          title = if job_titles.key?(role_name)
-                    job_titles[role_name].sample
-                  else
-                    role_name
-                  end
+          title_options = job_titles[role_name] || [role_name]
+          title_index = i % title_options.size
+          title = title_options[title_index]
 
           employee_data = {
             "name" => "#{first_name} #{last_name}",
@@ -321,6 +414,16 @@ module CloverRestaurant
           logger.info "Creating employee #{i + 1}/#{num_employees}: #{first_name} #{last_name} (Role: #{role_name})"
 
           begin
+            # Check if employee already exists by PIN
+            existing_employee = get_employee_by_pin(pin)
+
+            if existing_employee
+              logger.info "Employee with PIN #{pin} already exists, skipping creation"
+              created_employees << existing_employee
+              success_count += 1
+              next
+            end
+
             employee = create_employee(employee_data)
 
             if employee && employee["id"]

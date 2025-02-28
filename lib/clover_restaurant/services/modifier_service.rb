@@ -14,10 +14,19 @@ module CloverRestaurant
 
       def create_modifier_group(modifier_group_data)
         logger.info "=== Creating new modifier group for merchant #{@config.merchant_id} ==="
+
+        # Check if a modifier group with the same name already exists
+        existing_groups = get_modifier_groups
+        if existing_groups && existing_groups["elements"]
+          existing_group = existing_groups["elements"].find { |group| group["name"] == modifier_group_data["name"] }
+          if existing_group
+            logger.info "Modifier group '#{modifier_group_data["name"]}' already exists with ID: #{existing_group["id"]}, skipping creation"
+            return existing_group
+          end
+        end
+
         logger.info "Modifier group data: #{modifier_group_data.inspect}"
-        result = make_request(:post, endpoint("modifier_groups"), modifier_group_data)
-        logger.info "Created modifier group: #{result.inspect}"
-        result
+        make_request(:post, endpoint("modifier_groups"), modifier_group_data)
       end
 
       def update_modifier_group(modifier_group_id, modifier_group_data)
@@ -33,9 +42,8 @@ module CloverRestaurant
 
       def get_modifiers(modifier_group_id, limit = 100, offset = 0)
         logger.info "=== Fetching modifiers for modifier group #{modifier_group_id} ==="
-        endpoint_path = endpoint("modifier_groups/#{modifier_group_id}/modifiers")
-        logger.info "Using endpoint: #{endpoint_path}"
-        make_request(:get, endpoint_path, nil, { limit: limit, offset: offset })
+        make_request(:get, endpoint("modifier_groups/#{modifier_group_id}/modifiers"), nil,
+                     { limit: limit, offset: offset })
       end
 
       def get_modifier(modifier_id)
@@ -45,42 +53,21 @@ module CloverRestaurant
 
       def create_modifier(modifier_data)
         logger.info "=== Creating new modifier for merchant #{@config.merchant_id} ==="
-        logger.info "Modifier data: #{modifier_data.inspect}"
 
-        # Debug the modifier group relationship
+        # Check if this modifier already exists in the modifier group
         if modifier_data["modifierGroup"] && modifier_data["modifierGroup"]["id"]
-          logger.info "Modifier has valid group ID: #{modifier_data["modifierGroup"]["id"]}"
-        else
-          logger.warn "WARNING: Modifier missing required modifierGroup.id field"
-        end
-
-        # Try multiple approaches if the default one fails
-        begin
-          endpoint_path = endpoint("modifiers")
-          logger.info "Attempting to create modifier using endpoint: #{endpoint_path}"
-          result = make_request(:post, endpoint_path, modifier_data)
-          logger.info "Successfully created modifier: #{result.inspect}"
-          result
-        rescue StandardError => e
-          logger.error "Failed to create modifier using default endpoint: #{e.message}"
-
-          # Try alternate endpoint if we have a modifier group ID
-          raise e unless modifier_data["modifierGroup"] && modifier_data["modifierGroup"]["id"]
-
-          group_id = modifier_data["modifierGroup"]["id"]
-          begin
-            alternate_endpoint = endpoint("modifier_groups/#{group_id}/modifiers")
-            logger.info "Trying alternate endpoint: #{alternate_endpoint}"
-            result = make_request(:post, alternate_endpoint, modifier_data)
-            logger.info "Successfully created modifier using alternate endpoint"
-            result
-          rescue StandardError => e2
-            logger.error "Failed using alternate endpoint too: #{e2.message}"
-            raise e2 # Re-raise the error if both attempts fail
+          group_modifiers = get_modifiers(modifier_data["modifierGroup"]["id"])
+          if group_modifiers && group_modifiers["elements"]
+            existing_modifier = group_modifiers["elements"].find { |mod| mod["name"] == modifier_data["name"] }
+            if existing_modifier
+              logger.info "Modifier '#{modifier_data["name"]}' already exists in group with ID: #{existing_modifier["id"]}, skipping creation"
+              return existing_modifier
+            end
           end
-
-          # Re-raise the original error
         end
+
+        logger.info "Modifier data: #{modifier_data.inspect}"
+        make_request(:post, endpoint("modifiers"), modifier_data)
       end
 
       def update_modifier(modifier_id, modifier_data)
@@ -96,13 +83,21 @@ module CloverRestaurant
 
       def add_modifier_group_to_item(item_id, modifier_group_id)
         logger.info "=== Adding modifier group #{modifier_group_id} to item #{item_id} ==="
+
+        # Check if this modifier group is already added to the item
+        item_modifier_groups = get_item_modifier_groups(item_id)
+        if item_modifier_groups && item_modifier_groups["elements"] && item_modifier_groups["elements"].any? do |group|
+          group["id"] == modifier_group_id
+        end
+          logger.info "Modifier group #{modifier_group_id} already added to item #{item_id}, skipping"
+          return true
+        end
+
         payload = {
           "modifierGroup" => { "id" => modifier_group_id }
         }
         logger.info "Request payload: #{payload.inspect}"
-        endpoint_path = endpoint("items/#{item_id}/modifier_groups")
-        logger.info "Using endpoint: #{endpoint_path}"
-        make_request(:post, endpoint_path, payload)
+        make_request(:post, endpoint("items/#{item_id}/modifier_groups"), payload)
       end
 
       def remove_modifier_group_from_item(item_id, modifier_group_id)
@@ -117,6 +112,22 @@ module CloverRestaurant
 
       def create_common_modifier_groups
         logger.info "=== Creating common restaurant modifier groups ==="
+
+        # Check if common modifier groups already exist
+        existing_groups = get_modifier_groups
+        if existing_groups && existing_groups["elements"] && !existing_groups["elements"].empty?
+          common_group_names = ["Size Options", "Temperature", "Add-ons", "Dressing Options",
+                                "Protein Options", "Spice Level", "Bread Options"]
+
+          existing_common_groups = existing_groups["elements"].select do |group|
+            common_group_names.include?(group["name"])
+          end
+
+          if existing_common_groups.size >= 5
+            logger.info "Found #{existing_common_groups.size} common modifier groups, skipping creation"
+            return existing_common_groups
+          end
+        end
 
         # Define common modifier groups for restaurant items
         groups_config = [
@@ -196,68 +207,60 @@ module CloverRestaurant
         ]
 
         created_groups = []
+        success_count = 0
+        error_count = 0
 
-        groups_config.each_with_index do |group_config, group_index|
-          logger.info "=== Creating modifier group #{group_index + 1}/#{groups_config.size}: #{group_config[:name]} ==="
+        groups_config.each_with_index do |group_config, index|
+          logger.info "Creating group #{index + 1}/#{groups_config.size}: #{group_config[:name]}"
 
           group_data = {
             "name" => group_config[:name],
             "selectionType" => group_config[:selection_type]
           }
 
-          logger.info "Group data: #{group_data.inspect}"
-
           begin
             group = create_modifier_group(group_data)
 
             if group && group["id"]
-              logger.info "Successfully created modifier group: #{group["name"]} with ID: #{group["id"]}"
               created_groups << group
+              success_count += 1
+              logger.info "Successfully created modifier group: #{group["name"]} with ID: #{group["id"]}"
 
               # Create modifiers for this group
-              logger.info "=== Creating modifiers for group: #{group["name"]} ==="
+              group_config[:modifiers].each_with_index do |modifier_config, mod_index|
+                logger.info "Creating modifier #{mod_index + 1}/#{group_config[:modifiers].size}: #{modifier_config[:name]}"
 
-              success_count = 0
-              error_count = 0
-
-              group_config[:modifiers].each_with_index do |modifier_config, index|
                 modifier_data = {
                   "name" => modifier_config[:name],
                   "price" => modifier_config[:price],
                   "modifierGroup" => { "id" => group["id"] },
-                  "sortOrder" => index * 10
+                  "sortOrder" => mod_index * 10
                 }
 
-                logger.info "Creating modifier #{index + 1}/#{group_config[:modifiers].size}: #{modifier_config[:name]}"
-
                 begin
-                  result = create_modifier(modifier_data)
-                  if result && result["id"]
-                    logger.info "Successfully created modifier: #{modifier_config[:name]} with ID: #{result["id"]}"
-                    success_count += 1
+                  modifier = create_modifier(modifier_data)
+                  if modifier && modifier["id"]
+                    logger.info "Successfully created modifier: #{modifier["name"]} with ID: #{modifier["id"]}"
                   else
-                    logger.warn "Created modifier but received unexpected response: #{result.inspect}"
+                    logger.warn "Failed to create modifier or received unexpected response: #{modifier.inspect}"
                     error_count += 1
                   end
                 rescue StandardError => e
-                  logger.error "Failed to create modifier: #{e.message}"
-                  logger.error "Modifier data was: #{modifier_data.inspect}"
+                  logger.error "Error creating modifier: #{e.message}"
                   error_count += 1
-                  # Continue with next modifier even after error
                 end
               end
-
-              logger.info "=== Finished creating modifiers for group #{group["name"]}: #{success_count} successful, #{error_count} failed ==="
             else
-              logger.error "Failed to create modifier group - received invalid response: #{group.inspect}"
+              logger.warn "Failed to create modifier group or received unexpected response: #{group.inspect}"
+              error_count += 1
             end
           rescue StandardError => e
-            logger.error "Failed to create modifier group: #{e.message}"
-            logger.error "Group data was: #{group_data.inspect}"
+            logger.error "Error creating modifier group: #{e.message}"
+            error_count += 1
           end
         end
 
-        logger.info "=== Finished creating modifier groups. Total created: #{created_groups.size} ==="
+        logger.info "=== Finished creating modifier groups: #{success_count} groups successful, #{error_count} errors ==="
         created_groups
       end
 
@@ -265,29 +268,23 @@ module CloverRestaurant
         logger.info "=== Assigning appropriate modifiers to items ==="
 
         # Get all modifier groups
-        logger.info "Fetching existing modifier groups"
         all_groups = get_modifier_groups
-
         unless all_groups && all_groups["elements"]
-          logger.error "Failed to retrieve modifier groups or received empty response"
+          logger.error "No modifier groups found"
           return false
         end
-
-        logger.info "Found #{all_groups["elements"].size} existing modifier groups"
 
         group_map = {}
         all_groups["elements"].each do |group|
           group_map[group["name"]] = group
-          logger.info "  - Group: #{group["name"]} (ID: #{group["id"]})"
         end
 
         # Create common groups if they don't exist
         if group_map.empty? || group_map.keys.length < 5
-          logger.info "Insufficient modifier groups found, creating common groups"
+          logger.info "Insufficient modifier groups found, creating common ones"
           created_groups = create_common_modifier_groups
           created_groups.each do |group|
             group_map[group["name"]] = group
-            logger.info "Added new group to map: #{group["name"]} (ID: #{group["id"]})"
           end
         end
 
@@ -314,10 +311,20 @@ module CloverRestaurant
         default_modifiers = ["Size Options", "Add-ons"]
 
         assigned_count = 0
+        skipped_count = 0
         error_count = 0
 
         items.each_with_index do |item, index|
-          logger.info "=== Processing item #{index + 1}/#{items.size}: #{item["name"]} ==="
+          logger.info "Processing item #{index + 1}/#{items.size}: #{item["name"]}"
+
+          # Skip items that already have modifier groups assigned
+          item_modifier_groups = get_item_modifier_groups(item["id"])
+          if item_modifier_groups && item_modifier_groups["elements"] && !item_modifier_groups["elements"].empty?
+            logger.info "Item #{item["name"]} already has #{item_modifier_groups["elements"].size} modifier groups, skipping"
+            skipped_count += 1
+            next
+          end
+
           item_name = item["name"].downcase
 
           # Find appropriate modifier groups
@@ -325,48 +332,40 @@ module CloverRestaurant
 
           # Check for specific matches
           item_to_modifier_mapping.each do |key, modifiers|
-            next unless item_name.include?(key)
-
-            applicable_modifiers = modifiers
-            logger.info "Found matching key '#{key}' for item '#{item_name}'"
-            break
+            if item_name.include?(key)
+              applicable_modifiers = modifiers
+              break
+            end
           end
 
           # Use default if no specific match
-          if applicable_modifiers.empty?
-            logger.info "No specific match found for '#{item_name}', using default modifiers"
-            applicable_modifiers = default_modifiers
-          end
+          applicable_modifiers = default_modifiers if applicable_modifiers.empty?
 
           # Add random modifiers (for variety)
-          if rand < 0.3 && !applicable_modifiers.include?("Spice Level")
-            logger.info "Randomly adding 'Spice Level' modifier"
-            applicable_modifiers << "Spice Level"
-          end
+          # Use a consistent seed based on item ID to ensure the same result for VCR
+          random_seed = item["id"].to_s.chars.map(&:ord).sum % 100
+          applicable_modifiers << "Spice Level" if random_seed < 30 && !applicable_modifiers.include?("Spice Level")
 
-          logger.info "Applicable modifiers for '#{item_name}': #{applicable_modifiers.inspect}"
+          logger.info "Assigning #{applicable_modifiers.size} modifiers to item #{item["name"]}"
 
           # Assign modifier groups to item
           applicable_modifiers.each do |modifier_name|
-            unless group_map[modifier_name]
+            if group_map[modifier_name]
+              begin
+                logger.info "Adding #{modifier_name} to item #{item["name"]}"
+                add_modifier_group_to_item(item["id"], group_map[modifier_name]["id"])
+                assigned_count += 1
+              rescue StandardError => e
+                logger.error "Error assigning modifier #{modifier_name} to item #{item["name"]}: #{e.message}"
+                error_count += 1
+              end
+            else
               logger.warn "Modifier group '#{modifier_name}' not found in available groups"
-              next
-            end
-
-            logger.info "Assigning modifier group '#{modifier_name}' (ID: #{group_map[modifier_name]["id"]}) to item '#{item["name"]}' (ID: #{item["id"]})"
-
-            begin
-              add_modifier_group_to_item(item["id"], group_map[modifier_name]["id"])
-              assigned_count += 1
-              logger.info "Successfully assigned modifier group"
-            rescue StandardError => e
-              logger.error "Error assigning modifier #{modifier_name} to item #{item["name"]}: #{e.message}"
-              error_count += 1
             end
           end
         end
 
-        logger.info "=== Finished assigning modifiers: #{assigned_count} successful, #{error_count} failed ==="
+        logger.info "=== Finished assigning modifiers: #{assigned_count} assignments, #{skipped_count} skipped, #{error_count} errors ==="
         true
       end
     end

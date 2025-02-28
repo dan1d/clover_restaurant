@@ -15,6 +15,16 @@ module CloverRestaurant
       def create_discount(discount_data)
         logger.info "=== Creating new discount for merchant #{@config.merchant_id} ==="
 
+        # Check if a discount with this name already exists
+        existing_discounts = get_discounts
+        if existing_discounts && existing_discounts["elements"]
+          existing_discount = existing_discounts["elements"].find { |d| d["name"] == discount_data["name"] }
+          if existing_discount
+            logger.info "Discount '#{discount_data["name"]}' already exists with ID: #{existing_discount["id"]}, skipping creation"
+            return existing_discount
+          end
+        end
+
         # IMPORTANT: Clover API requires discount amounts to be negative
         if discount_data["amount"] && discount_data["amount"] > 0
           logger.info "Converting positive amount to negative: #{discount_data["amount"]} -> #{-discount_data["amount"]}"
@@ -45,8 +55,24 @@ module CloverRestaurant
 
       def apply_discount_to_order(order_id, discount_data)
         logger.info "=== Applying discount to order #{order_id} ==="
+
+        # Check if discount is already applied to this order
+        existing_discounts = get_order_discounts(order_id)
+        if existing_discounts && existing_discounts["elements"] && discount_data["discount"] && discount_data["discount"]["id"]
+          discount_id = discount_data["discount"]["id"]
+          if existing_discounts["elements"].any? { |d| d["discount"] && d["discount"]["id"] == discount_id }
+            logger.info "Discount #{discount_id} already applied to order #{order_id}, skipping"
+            return existing_discounts["elements"].find { |d| d["discount"]["id"] == discount_id }
+          end
+        end
+
         logger.info "Discount data: #{discount_data.inspect}"
         make_request(:post, endpoint("orders/#{order_id}/discounts"), discount_data)
+      end
+
+      def get_order_discounts(order_id)
+        logger.info "=== Fetching discounts for order #{order_id} ==="
+        make_request(:get, endpoint("orders/#{order_id}/discounts"))
       end
 
       def remove_discount_from_order(order_id, order_discount_id)
@@ -56,8 +82,24 @@ module CloverRestaurant
 
       def apply_line_item_discount(order_id, line_item_id, discount_data)
         logger.info "=== Applying discount to line item #{line_item_id} in order #{order_id} ==="
+
+        # Check if discount is already applied to this line item
+        existing_discounts = get_line_item_discounts(order_id, line_item_id)
+        if existing_discounts && existing_discounts["elements"] && discount_data["discount"] && discount_data["discount"]["id"]
+          discount_id = discount_data["discount"]["id"]
+          if existing_discounts["elements"].any? { |d| d["discount"] && d["discount"]["id"] == discount_id }
+            logger.info "Discount #{discount_id} already applied to line item #{line_item_id}, skipping"
+            return existing_discounts["elements"].find { |d| d["discount"]["id"] == discount_id }
+          end
+        end
+
         logger.info "Discount data: #{discount_data.inspect}"
         make_request(:post, endpoint("orders/#{order_id}/line_items/#{line_item_id}/discounts"), discount_data)
+      end
+
+      def get_line_item_discounts(order_id, line_item_id)
+        logger.info "=== Fetching discounts for line item #{line_item_id} in order #{order_id} ==="
+        make_request(:get, endpoint("orders/#{order_id}/line_items/#{line_item_id}/discounts"))
       end
 
       def remove_line_item_discount(order_id, line_item_id, discount_id)
@@ -67,6 +109,20 @@ module CloverRestaurant
 
       def create_standard_discounts
         logger.info "=== Creating standard restaurant discounts ==="
+
+        # Check if standard discounts already exist
+        existing_discounts = get_discounts
+        if existing_discounts && existing_discounts["elements"] && existing_discounts["elements"].size >= 5
+          standard_names = ["Happy Hour", "Senior Discount", "Military Discount", "Employee Discount",
+                            "First-Time Customer", "Lunch Special", "10% Off", "15% Off", "20% Off"]
+
+          existing_standard = existing_discounts["elements"].select { |d| standard_names.include?(d["name"]) }
+
+          if existing_standard.size >= 5
+            logger.info "Found #{existing_standard.size} standard discounts already existing, skipping creation"
+            return existing_standard
+          end
+        end
 
         standard_discounts = [
           {
@@ -182,9 +238,10 @@ module CloverRestaurant
 
         logger.info "Found #{available_discounts.size} available discounts"
 
-        # Select a random discount
-        discount = available_discounts.sample
-        logger.info "Selected random discount: #{discount["name"]} (ID: #{discount["id"]})"
+        # Use a deterministic selection based on order ID to ensure consistency for VCR
+        seed = order_id.to_s.chars.map(&:ord).sum % available_discounts.size
+        discount = available_discounts[seed]
+        logger.info "Selected discount: #{discount["name"]} (ID: #{discount["id"]})"
 
         # Apply it to the order
         discount_data = {
@@ -219,9 +276,10 @@ module CloverRestaurant
 
         logger.info "Found #{available_discounts.size} available discounts"
 
-        # Select a random discount
-        discount = available_discounts.sample
-        logger.info "Selected random discount: #{discount["name"]} (ID: #{discount["id"]})"
+        # Use a deterministic selection based on line item ID to ensure consistency for VCR
+        seed = line_item_id.to_s.chars.map(&:ord).sum % available_discounts.size
+        discount = available_discounts[seed]
+        logger.info "Selected discount: #{discount["name"]} (ID: #{discount["id"]})"
 
         # Apply it to the line item
         discount_data = {
@@ -234,6 +292,16 @@ module CloverRestaurant
 
       def create_limited_time_offer(name, discount_amount, is_percentage = true, start_date = nil, end_date = nil)
         logger.info "=== Creating limited time offer: #{name} ==="
+
+        # Check if this limited time offer already exists
+        existing_discounts = get_discounts
+        if existing_discounts && existing_discounts["elements"]
+          existing_offer = existing_discounts["elements"].find { |d| d["name"] == "LIMITED TIME: #{name}" }
+          if existing_offer
+            logger.info "Limited time offer '#{name}' already exists with ID: #{existing_offer["id"]}, skipping creation"
+            return existing_offer
+          end
+        end
 
         # Set default dates if not provided
         start_date ||= Date.today
@@ -261,6 +329,16 @@ module CloverRestaurant
 
       def create_combo_deal(name, amount)
         logger.info "=== Creating combo deal: #{name} ==="
+
+        # Check if this combo deal already exists
+        existing_discounts = get_discounts
+        if existing_discounts && existing_discounts["elements"]
+          existing_combo = existing_discounts["elements"].find { |d| d["name"] == "COMBO: #{name}" }
+          if existing_combo
+            logger.info "Combo deal '#{name}' already exists with ID: #{existing_combo["id"]}, skipping creation"
+            return existing_combo
+          end
+        end
 
         # IMPORTANT: Make sure amount is negative for a discount
         amount = -amount.to_i.abs

@@ -18,6 +18,25 @@ module CloverRestaurant
       def create_customer(customer_data)
         logger.info "=== Creating new customer for merchant #{@config.merchant_id} ==="
 
+        # Check if customer already exists by phone or email
+        if customer_data["phoneNumbers"] && !customer_data["phoneNumbers"].empty?
+          phone = customer_data["phoneNumbers"].first["phoneNumber"]
+          existing_customer = get_customer_by_phone(phone)
+          if existing_customer
+            logger.info "Customer with phone #{phone} already exists with ID: #{existing_customer["id"]}, skipping creation"
+            return existing_customer
+          end
+        end
+
+        if customer_data["emailAddresses"] && !customer_data["emailAddresses"].empty?
+          email = customer_data["emailAddresses"].first["emailAddress"]
+          existing_customer = get_customer_by_email(email)
+          if existing_customer
+            logger.info "Customer with email #{email} already exists with ID: #{existing_customer["id"]}, skipping creation"
+            return existing_customer
+          end
+        end
+
         # Validate email address format
         if customer_data["emailAddresses"] && !customer_data["emailAddresses"].empty?
           customer_data["emailAddresses"].each do |email_entry|
@@ -209,6 +228,13 @@ module CloverRestaurant
       def create_random_customers(num_customers = 10)
         logger.info "=== Creating #{num_customers} random customers ==="
 
+        # Check for existing customers first
+        existing_customers = get_customers(limit: 100)
+        if existing_customers && existing_customers["elements"] && existing_customers["elements"].size >= num_customers / 2
+          logger.info "Found #{existing_customers["elements"].size} existing customers, skipping creation"
+          return existing_customers["elements"].first(num_customers)
+        end
+
         created_customers = []
         success_count = 0
         error_count = 0
@@ -238,11 +264,11 @@ module CloverRestaurant
                 "emailAddress" => email
               }
             ],
-            "marketingAllowed" => [true, false].sample
+            "marketingAllowed" => i.even? # Deterministic instead of random
           }
 
-          # Add address sometimes
-          if rand < 0.7 # 70% chance
+          # Add address sometimes - use modulo for deterministic behavior
+          if i % 10 < 7 # 70% chance - deterministic
             customer_data["addresses"] = [
               {
                 "address1" => "#{100 + i} Main St",
@@ -254,17 +280,17 @@ module CloverRestaurant
             ]
           end
 
-          # Add birthday sometimes
-          if rand < 0.3 # 30% chance
+          # Add birthday sometimes - use modulo for deterministic behavior
+          if i % 10 < 3 # 30% chance - deterministic
             # Generate a date between 18 and 70 years ago
-            year = Time.now.year - rand(18..70)
-            month = rand(1..12).to_s.rjust(2, "0")
-            day = rand(1..28).to_s.rjust(2, "0")
+            year = Time.now.year - (18 + (i % 52)) # Deterministic age 18-70
+            month = (1 + (i % 12)).to_s.rjust(2, "0")
+            day = (1 + (i % 28)).to_s.rjust(2, "0")
             customer_data["birthDate"] = "#{year}-#{month}-#{day}"
           end
 
-          # Add notes sometimes
-          if rand < 0.4 # 40% chance
+          # Add notes sometimes - use modulo for deterministic behavior
+          if i % 10 < 4 # 40% chance - deterministic
             note_options = [
               "Prefers booth seating",
               "Allergic to nuts",
@@ -278,13 +304,26 @@ module CloverRestaurant
               "Gluten intolerant"
             ]
 
-            customer_data["note"] = note_options.sample
+            note_index = i % note_options.size
+            customer_data["note"] = note_options[note_index]
           end
 
           logger.info "Creating customer #{i + 1}/#{num_customers}: #{first_name} #{last_name}"
           logger.info "Customer data: #{customer_data.inspect}"
 
           begin
+            # Check if customer already exists by phone or email before creating
+            existing_customer = get_customer_by_phone(phone)
+
+            existing_customer ||= get_customer_by_email(email)
+
+            if existing_customer
+              logger.info "Customer already exists with ID: #{existing_customer["id"]}, skipping creation"
+              created_customers << existing_customer
+              success_count += 1
+              next
+            end
+
             customer = create_customer(customer_data)
 
             if customer && customer["id"]

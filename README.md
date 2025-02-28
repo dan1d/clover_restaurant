@@ -2,6 +2,21 @@
 
 A comprehensive Ruby gem for interacting with the Clover API, designed specifically for restaurant operations.
 
+## Overview
+
+CloverRestaurant provides a complete suite of tools for managing all aspects of a restaurant business through the Clover API, including:
+
+- Complete inventory management (items, categories, modifiers)
+- Order processing and payment handling
+- Employee management and shift tracking
+- Customer relationship management
+- Table and reservation management
+- Menu creation and organization
+- Discount and tax rate configuration
+- Data generation for testing and simulation
+
+The gem also includes powerful simulation capabilities that can generate realistic business data over extended periods, making it perfect for testing, demonstrations, and development environments.
+
 ## Installation
 
 Add this line to your application's Gemfile:
@@ -39,19 +54,32 @@ end
 
 ## Usage
 
-The gem provides service classes for all aspects of restaurant operations:
+### Service Manager
+
+CloverRestaurant provides a convenient service manager to access all functionality:
+
+```ruby
+# Get the service manager
+services = CloverRestaurant.services
+
+# Access individual services
+inventory_service = services.inventory
+order_service = services.order
+customer_service = services.customer
+# and so on...
+
+# You can also initialize services directly
+inventory_service = CloverRestaurant::Services::InventoryService.new
+```
 
 ### Inventory Management
 
 ```ruby
-# Create inventory service
-inventory_service = CloverRestaurant::InventoryService.new
-
 # Get all items
-items = inventory_service.get_items
+items = services.inventory.get_items
 
 # Create a new item
-item = inventory_service.create_item({
+item = services.inventory.create_item({
   'name' => 'Margherita Pizza',
   'price' => 1495,  # $14.95
   'priceType' => 'FIXED',
@@ -60,112 +88,92 @@ item = inventory_service.create_item({
 })
 
 # Generate random restaurant inventory
-inventory = inventory_service.create_random_restaurant_inventory(5, 10)
+inventory = services.inventory.create_random_restaurant_inventory(5, 10)
 # Creates 5 categories with about 10 items each
 ```
 
 ### Order Management
 
 ```ruby
-# Create order service
-order_service = CloverRestaurant::OrderService.new
-
 # Create a new order
-order = order_service.create_order
+order = services.order.create_order
 
 # Add an item to the order
-line_item = order_service.add_line_item(order['id'], item_id, 2)  # Add 2 of the item
+line_item = services.order.add_line_item(order['id'], item_id, 2)  # Add 2 of the item
 
 # Add a discount to the order
-discount_service = CloverRestaurant::DiscountService.new
-discount = discount_service.create_discount({
+discount = services.discount.create_discount({
   'name' => 'Happy Hour',
   'percentage' => 15
 })
 
-order_service.add_discount(order['id'], { 'discount' => { 'id' => discount['id'] } })
+services.order.add_discount(order['id'], { 'discount' => { 'id' => discount['id'] } })
 
 # Create a random order with random items
-random_order = order_service.create_random_order(items)
+random_order = services.order.create_random_order(items)
 ```
 
 ### Payment Processing
 
 ```ruby
-# Create payment service
-payment_service = CloverRestaurant::PaymentService.new
-
 # Process a card payment
-payment = payment_service.simulate_card_payment(order['id'], 2495)
+payment = services.payment.simulate_card_payment(order['id'], 2495)
 
 # Add a tip
-tip_service = CloverRestaurant::TipService.new
-tip_service.add_tip_to_payment(payment['id'], 500)  # $5.00 tip
+services.tip.add_tip_to_payment(payment['id'], 500)  # $5.00 tip
 ```
 
 ### Table Management
 
 ```ruby
-# Create table service
-table_service = CloverRestaurant::TableService.new
-
 # Create a standard restaurant layout
-layout = table_service.create_standard_restaurant_layout("Main Dining Room")
+layout = services.table.create_standard_restaurant_layout("Main Dining Room")
 
 # Assign an order to a table
-table_service.assign_order_to_table(order['id'], table_id)
+services.table.assign_order_to_table(order['id'], table_id)
 
 # Get table status
-status = table_service.get_table_status
+status = services.table.get_table_status
 ```
 
 ### Reservations
 
 ```ruby
-# Create reservation service
-reservation_service = CloverRestaurant::ReservationService.new
-
 # Make a reservation
-reservation = reservation_service.make_customer_reservation(
+reservation = services.reservation.make_customer_reservation(
   { 'firstName' => 'John', 'lastName' => 'Smith', 'phoneNumber' => '555-123-4567' },
   DateTime.now + 2,  # 2 days from now
   4                  # Party of 4
 )
 
 # Find available tables
-available_tables = reservation_service.find_available_tables(DateTime.now + 2, 4)
+available_tables = services.reservation.find_available_tables(DateTime.now + 2, 4)
 
 # Generate random reservations for testing
-random_reservations = reservation_service.create_random_reservations(10)
+random_reservations = services.reservation.create_random_reservations(10)
 ```
 
 ### Employees
 
 ```ruby
-# Create employee service
-employee_service = CloverRestaurant::EmployeeService.new
-
 # Create standard roles
-roles = employee_service.create_standard_restaurant_roles
+roles = services.employee.create_standard_restaurant_roles
 
 # Create random employees
-employees = employee_service.create_random_employees(5, roles)
+employees = services.employee.create_random_employees(5, roles)
 
 # Clock in an employee
-shift = employee_service.clock_in(employee_id)
+shift = services.employee.clock_in(employee_id)
 
 # Clock out
-employee_service.clock_out(shift['id'])
+services.employee.clock_out(shift['id'])
 ```
 
 ### Customers
 
 ```ruby
-# Create customer service
-customer_service = CloverRestaurant::CustomerService.new
-
 # Create or update a customer
-customer = customer_service.create_or_update_customer({
+customer = services.customer.create_or_update_customer({
   'firstName' => 'Jane',
   'lastName' => 'Doe',
   'phoneNumber' => '555-987-6543',
@@ -173,111 +181,117 @@ customer = customer_service.create_or_update_customer({
 })
 
 # Generate random customers for testing
-random_customers = customer_service.create_random_customers(10)
+random_customers = services.customer.create_random_customers(10)
 ```
 
 ### Menu Management
 
 ```ruby
-# Create menu service
-menu_service = CloverRestaurant::MenuService.new
-
 # Create a standard menu from your inventory
-menu = menu_service.create_standard_menu("Dinner Menu")
+menu = services.menu.create_standard_menu("Dinner Menu")
 
 # Create time-based menus
-time_menus = menu_service.create_time_based_menus
+time_menus = services.menu.create_time_based_menus
 
 # Print a menu
-menu_text = menu_service.print_menu(menu['id'])
+menu_text = services.menu.print_menu(menu['id'])
 ```
 
 ### Modifiers
 
 ```ruby
-# Create modifier service
-modifier_service = CloverRestaurant::ModifierService.new
-
 # Create common modifier groups
-modifier_groups = modifier_service.create_common_modifier_groups
+modifier_groups = services.modifier.create_common_modifier_groups
 
 # Assign modifiers to appropriate items
-modifier_service.assign_appropriate_modifiers_to_items(items)
+services.modifier.assign_appropriate_modifiers_to_items(items)
 ```
 
 ### Discounts
 
 ```ruby
-# Create discount service
-discount_service = CloverRestaurant::DiscountService.new
-
 # Create standard discounts
-discounts = discount_service.create_standard_discounts
+discounts = services.discount.create_standard_discounts
 
 # Apply a random discount to an order
-discount_service.apply_random_discount_to_order(order['id'])
+services.discount.apply_random_discount_to_order(order['id'])
 ```
 
 ### Tax Rates
 
 ```ruby
-# Create tax rate service
-tax_service = CloverRestaurant::TaxRateService.new
-
 # Create standard tax rates
-tax_rates = tax_service.create_standard_tax_rates
+tax_rates = services.tax_rate.create_standard_tax_rates
 
 # Assign appropriate tax rates to categories
-tax_service.assign_category_tax_rates(categories, tax_rates)
+services.tax_rate.assign_category_tax_rates(categories, tax_rates)
 ```
 
-## Creating a Complete Restaurant
+## Data Generation and Simulation
+
+CloverRestaurant includes robust data generation capabilities for creating test environments and simulations.
+
+### Creating a Complete Restaurant Setup
 
 ```ruby
-# Initialize all services
-inventory_service = CloverRestaurant::InventoryService.new
-modifier_service = CloverRestaurant::ModifierService.new
-employee_service = CloverRestaurant::EmployeeService.new
-customer_service = CloverRestaurant::CustomerService.new
-table_service = CloverRestaurant::TableService.new
-menu_service = CloverRestaurant::MenuService.new
-discount_service = CloverRestaurant::DiscountService.new
-tax_service = CloverRestaurant::TaxRateService.new
-reservation_service = CloverRestaurant::ReservationService.new
-
-# Step 1: Create inventory with categories and items
-inventory = inventory_service.create_random_restaurant_inventory(5, 10)
-
-# Step 2: Create modifier groups and assign to items
-modifier_groups = modifier_service.create_common_modifier_groups
-modifier_service.assign_appropriate_modifiers_to_items(inventory[:items])
-
-# Step 3: Create tax rates and assign to categories
-tax_rates = tax_service.create_standard_tax_rates
-tax_service.assign_category_tax_rates(inventory[:categories], tax_rates)
-
-# Step 4: Create standard discounts
-discounts = discount_service.create_standard_discounts
-
-# Step 5: Create employee roles and employees
-roles = employee_service.create_standard_restaurant_roles
-employees = employee_service.create_random_employees(10, roles)
-
-# Step 6: Create customers
-customers = customer_service.create_random_customers(20)
-
-# Step 7: Create table layout
-layout = table_service.create_standard_restaurant_layout("Main Restaurant")
-
-# Step 8: Create menus
-standard_menu = menu_service.create_standard_menu("Main Menu", inventory[:categories], inventory[:items])
-time_menus = menu_service.create_time_based_menus(inventory[:items])
-
-# Step 9: Create some reservations
-reservations = reservation_service.create_random_reservations(15)
-
-puts "Restaurant setup complete!"
+# Initialize the entity generator to create all required entities
+services.create_entities
 ```
+
+This will create:
+- Inventory with categories and items
+- Modifier groups assigned to appropriate items
+- Standard tax rates
+- Standard discounts
+- Employee roles and employees
+- Customers
+- Table layout
+- Menus
+
+### Running a Business Simulation
+
+The gem includes a `RestaurantGenerator` for simulating business operations over time:
+
+```ruby
+# Create the restaurant generator
+generator = CloverRestaurant::DataGeneration::RestaurantGenerator.new
+
+# Setup the restaurant
+generator.setup_restaurant("Claude's Bistro")
+
+# Simulate a business day
+day_data = generator.simulate_business_day(Date.today)
+
+# Analyze the results
+analytics = CloverRestaurant::DataGeneration::AnalyticsGenerator.new
+summary = analytics.generate_period_summary([day_data], Date.today, 1)
+```
+
+You can also use the provided simulation script:
+
+```bash
+$ ruby simulate_restaurant.rb
+```
+
+This script will:
+1. Set up a complete restaurant in your Clover account
+2. Simulate a configurable number of business days
+3. Generate orders, payments, and refunds
+4. Produce a detailed analysis of the simulated period
+
+## Project Structure
+
+The gem is organized into the following modules:
+
+- `CloverRestaurant::Services`: Base API service classes for Clover endpoints
+- `CloverRestaurant::DataGeneration`: Tools for generating test data and simulations
+- `CloverRestaurant::CloverServicesManager`: Central access point for all services
+
+## Development
+
+After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
+
+To install this gem onto your local machine, run `bundle exec rake install`.
 
 ## License
 

@@ -20,6 +20,8 @@ Gem::Specification.new do |spec|
   spec.add_dependency "httparty", "~> 0.18.1"
   spec.add_dependency "json", "~> 2.3"
   spec.add_dependency "terminal-table", "~> 3.0"
+  spec.add_dependency "vcr"
+  spec.add_dependency "webmock"
 
   spec.add_development_dependency "bundler", "~> 2.0"
   spec.add_development_dependency "dotenv", "~> 2.8"

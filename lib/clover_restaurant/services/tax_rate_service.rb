@@ -3,32 +3,45 @@ module CloverRestaurant
   module Services
     class TaxRateService < BaseService
       def get_tax_rates(limit = 100, offset = 0)
-        logger.info "Fetching tax rates for merchant #{@config.merchant_id}"
+        logger.info "=== Fetching tax rates for merchant #{@config.merchant_id} ==="
         make_request(:get, endpoint("tax_rates"), nil, { limit: limit, offset: offset })
       end
 
       def get_tax_rate(tax_rate_id)
-        logger.info "Fetching tax rate #{tax_rate_id} for merchant #{@config.merchant_id}"
+        logger.info "=== Fetching tax rate #{tax_rate_id} for merchant #{@config.merchant_id} ==="
         make_request(:get, endpoint("tax_rates/#{tax_rate_id}"))
       end
 
       def create_tax_rate(tax_rate_data)
-        logger.info "Creating new tax rate for merchant #{@config.merchant_id}"
+        logger.info "=== Creating new tax rate for merchant #{@config.merchant_id} ==="
+
+        # Check if a tax rate with this name already exists
+        existing_rates = get_tax_rates
+        if existing_rates && existing_rates["elements"]
+          existing_rate = existing_rates["elements"].find { |r| r["name"] == tax_rate_data["name"] }
+          if existing_rate
+            logger.info "Tax rate '#{tax_rate_data["name"]}' already exists with ID: #{existing_rate["id"]}, skipping creation"
+            return existing_rate
+          end
+        end
+
+        logger.info "Tax rate data: #{tax_rate_data.inspect}"
         make_request(:post, endpoint("tax_rates"), tax_rate_data)
       end
 
       def update_tax_rate(tax_rate_id, tax_rate_data)
-        logger.info "Updating tax rate #{tax_rate_id} for merchant #{@config.merchant_id}"
+        logger.info "=== Updating tax rate #{tax_rate_id} for merchant #{@config.merchant_id} ==="
+        logger.info "Update data: #{tax_rate_data.inspect}"
         make_request(:post, endpoint("tax_rates/#{tax_rate_id}"), tax_rate_data)
       end
 
       def delete_tax_rate(tax_rate_id)
-        logger.info "Deleting tax rate #{tax_rate_id} for merchant #{@config.merchant_id}"
+        logger.info "=== Deleting tax rate #{tax_rate_id} for merchant #{@config.merchant_id} ==="
         make_request(:delete, endpoint("tax_rates/#{tax_rate_id}"))
       end
 
       def get_default_tax_rates
-        logger.info "Fetching default tax rates for merchant #{@config.merchant_id}"
+        logger.info "=== Fetching default tax rates for merchant #{@config.merchant_id} ==="
         make_request(:get, endpoint("default_tax_rates"))
       end
 
@@ -36,12 +49,19 @@ module CloverRestaurant
         logger.info "=== Setting default tax rates for merchant #{@config.merchant_id} ==="
         logger.info "Tax rate IDs: #{tax_rate_ids.inspect}"
 
-        # Based on API documentation and working example, the endpoint might be different
-        # Let's try multiple approaches
+        # Check if the tax rate is already set as default
+        default_rates = get_default_tax_rates
+        if default_rates && default_rates["elements"] &&
+           default_rates["elements"].any? { |dr| tax_rate_ids.include?(dr["id"]) }
+          logger.info "Tax rate is already set as default, skipping update"
+          return default_rates
+        end
 
-        # Approach 1: Using v3 default_tax_rates endpoint with POST (original approach)
+        # Try multiple approaches with progressive fallback for VCR compatibility
+
+        # Approach 1: Using v3 default_tax_rates endpoint with POST
         begin
-          # Create tax rate list as in original code
+          # Create tax rate list
           tax_rates = tax_rate_ids.map { |id| { "id" => id } }
           payload = { "elements" => tax_rates }
 
@@ -67,61 +87,100 @@ module CloverRestaurant
           logger.error "ATTEMPT 2 failed: #{e.message}"
         end
 
-        # Approach 3: Different payload structure - send as array
+        # Approach 3: Try updating the tax rate directly with isDefault=true
         begin
-          # Simpler payload structure
-          tax_rates = tax_rate_ids.map { |id| { "id" => id } }
+          logger.info "ATTEMPT 3: Updating tax rate directly with isDefault=true"
 
-          logger.info "ATTEMPT 3: Sending direct array of tax rates"
-          logger.info "Request payload: #{tax_rates.inspect}"
+          results = []
+          tax_rate_ids.each do |id|
+            tax_rate = get_tax_rate(id)
+            next unless tax_rate
 
-          return make_request(:post, endpoint("default_tax_rates"), tax_rates)
+            tax_rate["isDefault"] = true
+            result = update_tax_rate(id, { "isDefault" => true })
+            results << result if result
+          end
+
+          return results.empty? ? nil : results
         rescue StandardError => e
           logger.error "ATTEMPT 3 failed: #{e.message}"
         end
 
-        # Approach 4: Set individually one by one
-        begin
-          logger.info "ATTEMPT 4: Setting tax rates one by one"
+        logger.error "All attempts to set default tax rates failed"
+        nil
+      end
 
-          results = []
-          tax_rate_ids.each do |id|
-            logger.info "Setting tax rate ID: #{id} as default"
-            result = make_request(:post, endpoint("default_tax_rate"), { "id" => id })
-            results << result
-          end
+      def apply_tax_rate_to_item(item_id, tax_rate_id)
+        logger.info "=== Applying tax rate #{tax_rate_id} to item #{item_id} ==="
 
-          return results
-        rescue StandardError => e
-          logger.error "ATTEMPT 4 failed: #{e.message}"
+        # Check if this tax rate is already applied to the item
+        item_tax_rates = get_item_tax_rates(item_id)
+        if item_tax_rates && item_tax_rates["elements"] &&
+           item_tax_rates["elements"].any? { |tr| tr["id"] == tax_rate_id }
+          logger.info "Tax rate #{tax_rate_id} already applied to item #{item_id}, skipping"
+          return true
         end
 
-        # Approach 5: A different endpoint structure based on API docs
-        begin
-          logger.info "ATTEMPT 5: Using put with tax_rates/default endpoint"
+        payload = {
+          "taxRate" => { "id" => tax_rate_id }
+        }
+        logger.info "Request payload: #{payload.inspect}"
+        make_request(:post, endpoint("items/#{item_id}/tax_rates"), payload)
+      end
 
-          if tax_rate_ids.size == 1
-            tax_rate_id = tax_rate_ids.first
-            return make_request(:put, endpoint("tax_rates/#{tax_rate_id}/default"), { "isDefault" => true })
-          else
-            logger.warn "Cannot use approach 5 with multiple tax rates"
-            raise "Multiple tax rates not supported with this approach"
-          end
-        rescue StandardError => e
-          logger.error "ATTEMPT 5 failed: #{e.message}"
+      def remove_tax_rate_from_item(item_id, tax_rate_id)
+        logger.info "=== Removing tax rate #{tax_rate_id} from item #{item_id} ==="
+        make_request(:delete, endpoint("items/#{item_id}/tax_rates/#{tax_rate_id}"))
+      end
+
+      def get_item_tax_rates(item_id)
+        logger.info "=== Fetching tax rates for item #{item_id} ==="
+        make_request(:get, endpoint("items/#{item_id}/tax_rates"))
+      end
+
+      def apply_tax_rate_to_order(order_id, tax_rate_id)
+        logger.info "=== Applying tax rate #{tax_rate_id} to order #{order_id} ==="
+
+        # Check if this tax rate is already applied to the order
+        order_tax_rates = get_order_tax_rates(order_id)
+        if order_tax_rates && order_tax_rates["elements"] &&
+           order_tax_rates["elements"].any? { |tr| tr["id"] == tax_rate_id }
+          logger.info "Tax rate #{tax_rate_id} already applied to order #{order_id}, skipping"
+          return true
         end
 
-        # If all attempts have failed, let's flag the tax rate as default during creation/update
-        # instead of trying to set it separately
-        logger.error "All attempts to set default tax rates failed."
-        logger.info "Consider updating the tax rate directly with isDefault=true instead"
+        payload = {
+          "taxRate" => { "id" => tax_rate_id }
+        }
+        logger.info "Request payload: #{payload.inspect}"
+        make_request(:post, endpoint("orders/#{order_id}/tax_rates"), payload)
+      end
 
-        # Return empty array to indicate no default tax rates were set
-        []
+      def remove_tax_rate_from_order(order_id, tax_rate_id)
+        logger.info "=== Removing tax rate #{tax_rate_id} from order #{order_id} ==="
+        make_request(:delete, endpoint("orders/#{order_id}/tax_rates/#{tax_rate_id}"))
+      end
+
+      def get_order_tax_rates(order_id)
+        logger.info "=== Fetching tax rates for order #{order_id} ==="
+        make_request(:get, endpoint("orders/#{order_id}/tax_rates"))
       end
 
       def create_standard_tax_rates
         logger.info "=== Creating standard tax rates for a restaurant ==="
+
+        # Check if standard tax rates already exist
+        existing_tax_rates = get_tax_rates
+        if existing_tax_rates && existing_tax_rates["elements"] && !existing_tax_rates["elements"].empty?
+          standard_names = ["Sales Tax", "Alcohol Tax", "Takeout Tax", "No Tax"]
+
+          existing_standard = existing_tax_rates["elements"].select { |tr| standard_names.include?(tr["name"]) }
+
+          if existing_standard.size >= 3
+            logger.info "Found #{existing_standard.size} standard tax rates already existing, skipping creation"
+            return existing_standard
+          end
+        end
 
         standard_tax_rates = [
           {
@@ -151,6 +210,8 @@ module CloverRestaurant
         ]
 
         created_tax_rates = []
+        success_count = 0
+        error_count = 0
 
         logger.info "Creating #{standard_tax_rates.size} standard tax rates"
 
@@ -162,18 +223,20 @@ module CloverRestaurant
             if tax_rate && tax_rate["id"]
               logger.info "Successfully created tax rate: #{tax_rate["name"]} with ID: #{tax_rate["id"]}"
               created_tax_rates << tax_rate
+              success_count += 1
             else
               logger.warn "Created tax rate but received unexpected response: #{tax_rate.inspect}"
+              error_count += 1
             end
           rescue StandardError => e
             logger.error "Failed to create tax rate #{tax_rate_data["name"]}: #{e.message}"
+            error_count += 1
           end
         end
 
-        logger.info "Created #{created_tax_rates.size} tax rates successfully"
+        logger.info "Created #{success_count} tax rates successfully, #{error_count} failed"
 
-        # Instead of setting default tax rate through a separate API call,
-        # we attempt to do it but continue if it fails
+        # Set default tax rate (try but don't fail if it doesn't work)
         if default_tax_rate = created_tax_rates.find { |tr| tr["isDefault"] }
           logger.info "Setting default tax rate: #{default_tax_rate["name"]} (ID: #{default_tax_rate["id"]})"
 
@@ -191,87 +254,8 @@ module CloverRestaurant
         created_tax_rates
       end
 
-      def apply_tax_rate_to_item(item_id, tax_rate_id)
-        logger.info "Applying tax rate #{tax_rate_id} to item #{item_id}"
-        make_request(:post, endpoint("items/#{item_id}/tax_rates"), {
-                       "taxRate" => { "id" => tax_rate_id }
-                     })
-      end
-
-      def remove_tax_rate_from_item(item_id, tax_rate_id)
-        logger.info "Removing tax rate #{tax_rate_id} from item #{item_id}"
-        make_request(:delete, endpoint("items/#{item_id}/tax_rates/#{tax_rate_id}"))
-      end
-
-      def get_item_tax_rates(item_id)
-        logger.info "Fetching tax rates for item #{item_id}"
-        make_request(:get, endpoint("items/#{item_id}/tax_rates"))
-      end
-
-      def apply_tax_rate_to_order(order_id, tax_rate_id)
-        logger.info "Applying tax rate #{tax_rate_id} to order #{order_id}"
-        make_request(:post, endpoint("orders/#{order_id}/tax_rates"), {
-                       "taxRate" => { "id" => tax_rate_id }
-                     })
-      end
-
-      def remove_tax_rate_from_order(order_id, tax_rate_id)
-        logger.info "Removing tax rate #{tax_rate_id} from order #{order_id}"
-        make_request(:delete, endpoint("orders/#{order_id}/tax_rates/#{tax_rate_id}"))
-      end
-
-      def get_order_tax_rates(order_id)
-        logger.info "Fetching tax rates for order #{order_id}"
-        make_request(:get, endpoint("orders/#{order_id}/tax_rates"))
-      end
-
-      def create_standard_tax_rates
-        logger.info "Creating standard tax rates for a restaurant"
-
-        standard_tax_rates = [
-          {
-            "name" => "Sales Tax",
-            "rate" => 8.50,
-            "taxable" => true,
-            "isDefault" => true
-          },
-          {
-            "name" => "Alcohol Tax",
-            "rate" => 10.00,
-            "taxable" => true,
-            "isDefault" => false
-          },
-          {
-            "name" => "Takeout Tax",
-            "rate" => 6.00,
-            "taxable" => true,
-            "isDefault" => false
-          },
-          {
-            "name" => "No Tax",
-            "rate" => 0.00,
-            "taxable" => false,
-            "isDefault" => false
-          }
-        ]
-
-        created_tax_rates = []
-
-        standard_tax_rates.each do |tax_rate_data|
-          tax_rate = create_tax_rate(tax_rate_data)
-          created_tax_rates << tax_rate if tax_rate && tax_rate["id"]
-        end
-
-        # Set the default tax rate
-        if default_tax_rate = created_tax_rates.find { |tr| tr["isDefault"] }
-          set_default_tax_rates([default_tax_rate["id"]])
-        end
-
-        created_tax_rates
-      end
-
       def assign_category_tax_rates(categories, tax_rates)
-        logger.info "Assigning appropriate tax rates to categories"
+        logger.info "=== Assigning appropriate tax rates to categories ==="
 
         return false if categories.nil? || categories.empty? || tax_rates.nil? || tax_rates.empty?
 
@@ -301,10 +285,12 @@ module CloverRestaurant
           "Gift Cards" => ["No Tax"]
         }
 
-        # Process each category
-        inventory_service = InventoryService.new(@config)
+        assignment_count = 0
+        error_count = 0
 
-        categories.each do |category|
+        # Process each category
+        categories.each_with_index do |category, index|
+          logger.info "Processing category #{index + 1}/#{categories.size}: #{category["name"]}"
           category_name = category["name"]
 
           # Find matching tax rates for this category
@@ -324,21 +310,44 @@ module CloverRestaurant
           # Get items in this category
           items_response = make_request(:get, endpoint("categories/#{category["id"]}/items"))
 
-          next unless items_response && items_response["elements"]
+          unless items_response && items_response["elements"]
+            logger.warn "No items found for category #{category["name"]}"
+            next
+          end
+
+          logger.info "Found #{items_response["elements"].size} items in category #{category["name"]}"
 
           # Apply tax rates to each item
-          items_response["elements"].each do |item|
+          items_response["elements"].each_with_index do |item, item_index|
+            logger.info "Processing item #{item_index + 1}/#{items_response["elements"].size}: #{item["name"]}"
+
+            # Check if item already has tax rates assigned
+            item_tax_rates = get_item_tax_rates(item["id"])
+            if item_tax_rates && item_tax_rates["elements"] && !item_tax_rates["elements"].empty?
+              logger.info "Item #{item["name"]} already has tax rates assigned, skipping"
+              next
+            end
+
+            # Apply applicable tax rates
             applicable_tax_rates.each do |tax_rate|
-              apply_tax_rate_to_item(item["id"], tax_rate["id"])
+              logger.info "Applying tax rate #{tax_rate["name"]} to item #{item["name"]}"
+              begin
+                apply_tax_rate_to_item(item["id"], tax_rate["id"])
+                assignment_count += 1
+              rescue StandardError => e
+                logger.error "Failed to apply tax rate: #{e.message}"
+                error_count += 1
+              end
             end
           end
         end
 
+        logger.info "=== Finished assigning tax rates: #{assignment_count} assignments, #{error_count} errors ==="
         true
       end
 
       def calculate_tax(amount, tax_rate)
-        logger.info "Calculating tax for amount #{amount} with rate #{tax_rate}%"
+        logger.info "=== Calculating tax for amount #{amount} with rate #{tax_rate}% ==="
 
         tax_amount = (amount * tax_rate / 100.0).round
 

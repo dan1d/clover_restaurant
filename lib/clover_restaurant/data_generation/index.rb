@@ -1,5 +1,0 @@
-require_relative "base_generator"
-require_relative "entity_generator"
-require_relative "daily_operation_generator"
-require_relative "analytics_generator"
-require_relative "restaurant_generator"
