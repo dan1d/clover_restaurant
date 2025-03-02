@@ -99,7 +99,8 @@ module CloverRestaurant
       end
 
       # This method specifically handles bulk category assignments
-      # Fix for the bulk_assign_categories method in InventoryService
+      # Add this to lib/clover_restaurant/services/inventory_service.rb
+
       def bulk_assign_categories(item_category_mapping)
         logger.info "Bulk assigning #{item_category_mapping.size} items to categories"
 
@@ -164,7 +165,6 @@ module CloverRestaurant
           response = bulk_update_items(bulk_items)
 
           # The response appears to be an array directly, not a hash with 'elements' key
-          # This is likely where the error is occurring
           if response.is_a?(Array)
             successful_count = response.size
             logger.info "✅ Successfully updated #{successful_count} items with category assignments"
@@ -388,10 +388,9 @@ module CloverRestaurant
           item_category_mapping[item["id"]] = default_category_id if !assigned && default_category_id
         end
 
+        # Use bulk assignment if we have items to assign
         if item_category_mapping.any?
           bulk_assign_categories(item_category_mapping)
-          # Make sure we return the result properly
-
         else
           logger.info "No uncategorized items found"
           { success: true, updated_count: 0, assigned_count: 0, errors: [] }

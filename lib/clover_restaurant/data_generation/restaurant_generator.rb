@@ -230,6 +230,100 @@ module CloverRestaurant
 
       private
 
+      def ensure_employees_exist
+        puts "\nChecking restaurant employees...".colorize(:light_blue)
+
+        employee_service = CloverRestaurant::Services::EmployeeService.new
+
+        # First, ensure we have the necessary roles
+        puts "Creating standard restaurant roles..."
+        roles = employee_service.create_standard_restaurant_roles
+
+        if roles && !roles.empty?
+          puts "✅ Found #{roles.size} roles"
+        else
+          puts "❌ Failed to create roles, cannot create employees"
+          return
+        end
+
+        # Check existing employees
+        existing_employees = employee_service.get_employees
+        employee_count = existing_employees && existing_employees["elements"] ? existing_employees["elements"].size : 0
+        puts "Found #{employee_count} existing employees"
+
+        # Only create more employees if we have fewer than 5
+        if employee_count >= 5
+          puts "✅ Sufficient employees exist (#{employee_count})"
+          return
+        end
+
+        # Fixed employee data for predictable results
+        employees_data = [
+          { name: "John Manager", role_name: "Manager", pin: "1111" },
+          { name: "Mary Server", role_name: "Server", pin: "2222" },
+          { name: "Bob Bartender", role_name: "Bartender", pin: "3333" },
+          { name: "Alice Host", role_name: "Host", pin: "4444" },
+          { name: "Charlie Cook", role_name: "Kitchen Staff", pin: "5555" },
+          { name: "David Manager", role_name: "Manager", pin: "6666" },
+          { name: "Sarah Server", role_name: "Server", pin: "7777" },
+          { name: "Jake Bartender", role_name: "Bartender", pin: "8888" },
+          { name: "Emily Host", role_name: "Host", pin: "9999" },
+          { name: "Mike Cook", role_name: "Kitchen Staff", pin: "1010" }
+        ]
+
+        # Find role IDs
+        role_map = {}
+        roles.each do |role|
+          role_map[role["name"]] = role["id"]
+        end
+
+        created_employees = []
+
+        employees_data.each_with_index do |emp_data, index|
+          role_id = role_map[emp_data[:role_name]] || role_map.values.first # Default to first available role
+          next unless role_id
+
+          # Prepare employee data
+          first_name, last_name = emp_data[:name].split(" ", 2)
+
+          employee_data = {
+            "name" => emp_data[:name],
+            "nickname" => first_name,
+            "customId" => "EMP#{index + 100}",
+            "pin" => emp_data[:pin],
+            "roles" => [{ "id" => role_id }],
+            "inviteSent" => false,
+            "isOwner" => false
+          }
+
+          puts "Creating employee: #{employee_data["name"]} (#{emp_data[:role_name]})"
+
+          begin
+            # Check if employee already exists by PIN
+            existing_employee = employee_service.get_employee_by_pin(emp_data[:pin])
+
+            if existing_employee
+              puts "Employee with PIN #{emp_data[:pin]} already exists, skipping creation"
+              created_employees << existing_employee
+              next
+            end
+
+            employee = employee_service.create_employee(employee_data)
+
+            if employee && employee["id"]
+              puts "✅ Successfully created employee with ID: #{employee["id"]}"
+              created_employees << employee
+            else
+              puts "❌ Error creating employee"
+            end
+          rescue StandardError => e
+            puts "❌ Error creating employee: #{e.message}"
+          end
+        end
+
+        puts "Created #{created_employees.size} new employees"
+      end
+
       def load_inventory
         puts "=== Fetching inventory categories ==="
         categories_response = @services.with_cache(:categories) { @services.inventory.get_categories }
@@ -340,17 +434,7 @@ module CloverRestaurant
                             end
 
         # If no employees found, create a fallback admin employee
-        if @data[:employees].empty?
-          puts "No employees found, using fallback employee data"
-          @data[:employees] = [
-            {
-              "id" => "ADMIN_USER",
-              "name" => "Test Admin",
-              "role" => "ADMIN",
-              "isOwner" => true
-            }
-          ]
-        end
+        raise "here"
       rescue StandardError => e
         puts "Warning: Error loading employees: #{e.message}. Using fallback."
         puts e.backtrace
