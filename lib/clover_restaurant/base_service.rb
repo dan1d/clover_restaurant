@@ -50,6 +50,14 @@ module CloverRestaurant
       handle_response(response)
     end
 
+    def endpoint(path)
+      "v3/merchants/#{@config.merchant_id}/#{path.sub(%r{^/}, "")}"
+    end
+
+    def v2_endpoint(path)
+      "v2/merchant/#{@config.merchant_id}/#{path.sub(%r{^/}, "")}"
+    end
+
     private
 
     def send_http_request(method, url, payload)
@@ -96,7 +104,12 @@ module CloverRestaurant
       when 200..299
         return true unless response.body && !response.body.empty?
 
-        JSON.parse(response.body)
+        begin
+          JSON.parse(response.body)
+        rescue JSON::ParserError => e
+          logger.error "JSON parsing error: #{e.message}"
+          raise APIError, "JSON parsing error: #{e.message}"
+        end
       when 405
         logger.error "METHOD NOT ALLOWED ERROR (405): #{response.body}"
         raise APIError, "Method not allowed (405): #{response.body}"
@@ -113,9 +126,6 @@ module CloverRestaurant
         logger.error "REQUEST FAILED (#{response.code}): #{response.body}"
         raise APIError, "Request failed with status #{response.code}: #{response.body}"
       end
-    rescue JSON::ParserError => e
-      logger.error "JSON parsing error: #{e.message}"
-      raise APIError, "JSON parsing error: #{e.message}"
     end
 
     def generate_cassette_name(method, url, payload)
@@ -127,14 +137,6 @@ module CloverRestaurant
     def clear_cached_requests
       FileUtils.rm_rf("tmp/vcr_cassettes")
       logger.info "Cache cleared!"
-    end
-
-    def endpoint(path)
-      "v3/merchants/#{@config.merchant_id}/#{path.sub(%r{^/}, "")}"
-    end
-
-    def v2_endpoint(path)
-      "v2/merchant/#{@config.merchant_id}/#{path.sub(%r{^/}, "")}"
     end
   end
 end

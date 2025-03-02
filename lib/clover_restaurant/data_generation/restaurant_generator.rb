@@ -100,11 +100,12 @@ module CloverRestaurant
           puts "🚨 Only found #{existing_discounts.size} discounts! Creating more..."
         end
 
+        # Fixed required_discounts with proper format for the Clover API
         required_discounts = [
-          { "name" => "Happy Hour", "amount" => 500, "percentage" => false }, # $5 off
-          { "name" => "Loyalty Discount", "amount" => 10, "percentage" => true }, # 10% off
-          { "name" => "Employee Discount", "amount" => 20, "percentage" => true }, # 20% off
-          { "name" => "Holiday Special", "amount" => 15, "percentage" => true } # 15% off
+          { "name" => "Happy Hour", "amount" => -500 }, # $5 off (negative for discount)
+          { "name" => "Loyalty Discount", "percentage" => 10 }, # 10% off
+          { "name" => "Employee Discount", "percentage" => 20 }, # 20% off
+          { "name" => "Holiday Special", "percentage" => 15 } # 15% off
         ]
 
         created_discounts = []
@@ -236,8 +237,8 @@ module CloverRestaurant
           @data[:inventory][:categories] = categories_response["elements"]
           puts "Loaded #{@data[:inventory][:categories].size} categories."
         else
-          puts "No categories found."
-          @data[:inventory][:categories] = []
+          puts "No categories found. Creating default categories..."
+          @data[:inventory][:categories] = create_default_categories
         end
 
         puts "=== Fetching inventory items ==="
@@ -245,6 +246,20 @@ module CloverRestaurant
         if items_response && items_response["elements"]
           @data[:inventory][:items] = items_response["elements"]
           puts "Loaded #{@data[:inventory][:items].size} items."
+
+          # Check if items are already assigned to categories
+          items_with_categories = 0
+          @data[:inventory][:items].each do |item|
+            items_with_categories += 1 if item["categories"] && !item["categories"].empty?
+          end
+
+          # If most items don't have categories, assign them
+          if items_with_categories < @data[:inventory][:items].size * 0.8
+            puts "Only #{items_with_categories} out of #{@data[:inventory][:items].size} items have categories. Auto-assigning items to categories..."
+            assign_items_to_categories
+          else
+            puts "✅ Most items (#{items_with_categories} out of #{@data[:inventory][:items].size}) already have categories assigned."
+          end
         else
           puts "No items found."
           @data[:inventory][:items] = []
@@ -253,6 +268,57 @@ module CloverRestaurant
         puts "Error loading inventory: #{e.message}"
         @data[:inventory][:categories] = []
         @data[:inventory][:items] = []
+      end
+
+      # Add these new helper methods
+      def create_default_categories
+        puts "Creating default restaurant categories..."
+
+        default_categories = [
+          { "name" => "Appetizers" },
+          { "name" => "Entrees" },
+          { "name" => "Sides" },
+          { "name" => "Desserts" },
+          { "name" => "Drinks" },
+          { "name" => "Alcoholic Beverages" },
+          { "name" => "Specials" }
+        ]
+
+        created_categories = []
+
+        default_categories.each do |category_data|
+          response = @services.inventory.create_category(category_data)
+
+          if response && response["id"]
+            created_categories << response
+            puts "✅ Successfully created category: #{response["name"]} (ID: #{response["id"]})"
+          else
+            puts "❌ ERROR: Failed to create category. Response: #{response.inspect}"
+          end
+        end
+
+        created_categories
+      end
+
+      def assign_items_to_categories
+        puts "Assigning items to appropriate categories..."
+
+        # Use the new auto-assign method from InventoryService
+        result = @services.inventory.auto_assign_items_to_categories(
+          @data[:inventory][:items],
+          @data[:inventory][:categories]
+        )
+
+        if result && result[:success]
+          puts "✅ Successfully assigned #{result[:assigned_count]} items to categories."
+          if result[:errors].any?
+            puts "⚠️ Some assignments had errors: #{result[:errors].length} errors."
+            puts result[:errors].first(3).join("\n") if result[:errors].length > 0
+          end
+        else
+          puts "❌ Failed to assign items to categories."
+          puts result[:errors].join("\n") if result && result[:errors]
+        end
       end
 
       def load_employees_and_roles

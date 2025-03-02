@@ -15,8 +15,33 @@ module CloverRestaurant
       def create_discount(discount_data)
         logger.info "=== Creating new discount for merchant #{@config.merchant_id} ==="
 
-        logger.info "Discount Data: #{discount_data.inspect}"
-        response = make_request(:post, endpoint("discounts"), discount_data)
+        # Make a copy of the data to avoid modifying the original
+        data_to_send = discount_data.dup
+
+        # Ensure proper format according to Clover API:
+        # - 'amount' should be an integer and negative for discounts
+        # - 'percentage' should be an integer, not a boolean
+        # - remove any 'percentage' field if it's false or nil
+
+        # Handle amount field (ensure it's negative for discounts)
+        if data_to_send.key?("amount") && data_to_send["amount"] > 0
+          logger.info "Converting positive amount to negative: #{data_to_send["amount"]} -> #{-data_to_send["amount"].abs}"
+          data_to_send["amount"] = -data_to_send["amount"].abs
+        end
+
+        # Remove percentage field if it's false/nil, otherwise ensure it's an integer
+        if data_to_send.key?("percentage")
+          if data_to_send["percentage"] == false || data_to_send["percentage"].nil?
+            logger.info "Removing 'percentage' field because it's #{data_to_send["percentage"].inspect}"
+            data_to_send.delete("percentage")
+          elsif !data_to_send["percentage"].is_a?(Integer)
+            logger.info "Converting percentage to integer: #{data_to_send["percentage"]} -> #{data_to_send["percentage"].to_i}"
+            data_to_send["percentage"] = data_to_send["percentage"].to_i
+          end
+        end
+
+        logger.info "Discount Data to send: #{data_to_send.inspect}"
+        response = make_request(:post, endpoint("discounts"), data_to_send)
 
         if response && response["id"]
           logger.info "✅ Successfully created discount '#{response["name"]}' with ID: #{response["id"]}"

@@ -76,6 +76,13 @@ module CloverRestaurant
         with_cache(:customers) { @entity_generator.create_customers(30) }
         with_cache(:table_layout) { @entity_generator.create_table_layout }
         with_cache(:menus) { @entity_generator.create_menus(categories, items) }
+        with_cache(:orders) { @entity_generator.create_orders }
+        with_cache(:payments) { @entity_generator.create_payments }
+        with_cache(:refunds) { @entity_generator.create_refunds }
+        with_cache(:reservations) { @entity_generator.create_reservations }
+        with_cache(:taxes) { @entity_generator.create_taxes }
+        with_cache(:tenders) { @entity_generator.create_tenders }
+        with_cache(:tips) { @entity_generator.create_tips }
       end
 
       @entity_generator
