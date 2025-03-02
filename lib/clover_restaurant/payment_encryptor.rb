@@ -2,17 +2,24 @@ module CloverRestaurant
   class PaymentEncryptor
     attr_reader :logger
 
-    def initialize(pay_key, logger = nil)
-      @modulus = pay_key[:modulus]
-      @exponent = pay_key[:exponent]
-      @prefix = pay_key[:prefix]
+    def initialize(logger = nil)
+      # ✅ Ensure logger is never nil
       @logger = logger || CloverRestaurant.configuration.logger
-      @rsa_key = generate_rsa_public_key
+      @payment_keys = nil
+
+      if @payment_keys
+        @modulus = @payment_keys[:modulus]
+        @exponent = @payment_keys[:exponent]
+        @prefix = @payment_keys[:prefix]
+        @rsa_key = generate_rsa_public_key
+      else
+        @logger.error "❌ Payment keys are missing, encryption will not work!"
+      end
     end
 
     def encrypt_card(card_number)
       unless @rsa_key
-        logger.error "❌ Encryption Error: RSA Key is not generated."
+        @logger.error "❌ Encryption Error: RSA Key is not generated."
         return nil
       end
 
@@ -21,7 +28,7 @@ module CloverRestaurant
         encrypted = cipher.public_encrypt(@prefix + card_number, OpenSSL::PKey::RSA::PKCS1_OAEP_PADDING)
         Base64.strict_encode64(encrypted)
       rescue StandardError => e
-        logger.error "❌ Card Encryption Error: #{e.message}"
+        @logger.error "❌ Card Encryption Error: #{e.message}"
         nil
       end
     end
@@ -31,7 +38,7 @@ module CloverRestaurant
       encrypted_card = encrypt_card(card_number)
 
       unless encrypted_card
-        @logger.error "Failed to encrypt card data"
+        @logger.error "❌ Failed to encrypt card data"
         return nil
       end
 
@@ -52,11 +59,11 @@ module CloverRestaurant
 
     def generate_rsa_public_key
       if @modulus.nil? || @exponent.nil?
-        logger.error "❌ RSA Key Generation Error: Modulus or Exponent is missing!"
+        @logger.error "❌ RSA Key Generation Error: Modulus or Exponent is missing!"
         return nil
       end
 
-      logger.debug "🔐 Generating RSA public key"
+      @logger.debug "🔐 Generating RSA public key"
 
       begin
         modulus_bn = OpenSSL::BN.new(@modulus, 10)
@@ -69,7 +76,7 @@ module CloverRestaurant
 
         OpenSSL::PKey::RSA.new(sequence.to_der)
       rescue StandardError => e
-        logger.error "❌ RSA Key Generation Error: #{e.message}"
+        @logger.error "❌ RSA Key Generation Error: #{e.message}"
         nil
       end
     end

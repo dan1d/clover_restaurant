@@ -86,123 +86,50 @@ module CloverRestaurant
 
       # Bulk update items using PUT to the /bulk_items endpoint
       def bulk_update_items(items_data)
-        logger.info "Performing bulk update of #{items_data.size} items for merchant #{@config.merchant_id}"
+        def bulk_update_items(items_data)
+          logger.info "Performing bulk update of #{items_data.size} items for merchant #{@config.merchant_id}"
 
-        # Prepare the payload with the items array
-        payload = {
-          "items" => items_data
-        }
+          # Prepare the payload with the items array
+          payload = {
+            "items" => items_data
+          }
 
-        # Make the PUT request to the bulk_items endpoint
-        # Note: This must be a PUT request, not POST
-        make_request(:put, endpoint("bulk_items"), payload)
+          # Make the PUT request to the bulk_items endpoint
+          response = make_request(:put, endpoint("bulk_items"), payload)
+
+          if response.is_a?(Array)
+            # Wrap the array in a hash to match the expected format
+            { "elements" => response }
+          else
+            response
+          end
+        end
       end
 
       # This method specifically handles bulk category assignments
       # Add this to lib/clover_restaurant/services/inventory_service.rb
 
       def bulk_assign_categories(item_category_mapping)
-        logger.info "Bulk assigning #{item_category_mapping.size} items to categories"
-
-        # Get all items we need to update
-        all_items = []
-
-        # Use one API call to get all items
-        items_response = get_items(500) # Get up to 500 items
-        if items_response && items_response["elements"]
-          all_items = items_response["elements"]
-          logger.info "Retrieved #{all_items.size} items for category assignment"
-        else
-          logger.error "Failed to retrieve items for bulk assignment"
-          return { success: false, updated_count: 0, assigned_count: 0, errors: ["Failed to retrieve items"] }
-        end
-
-        # Create a map of item IDs to item data for faster lookup
-        item_map = {}
-        all_items.each do |item|
-          item_map[item["id"]] = item
-        end
-
-        # Prepare bulk update data
-        bulk_items = []
-
-        item_category_mapping.each do |item_id, category_id|
-          # Look up the complete item in our map
-          item = item_map[item_id]
+        bulk_items = item_category_mapping.map do |item_id, category_id|
+          item = get_item(item_id)
           next unless item
 
-          # Create a new item object with required fields
-          update_item = {
-            "id" => item_id
-          }
-
-          # Set categories field (completely replacing any existing categories)
-          update_item["categories"] = [{ "id" => category_id }]
-
-          # Copy essential fields from original item
-          # These fields are required for a complete item update
-          update_item["name"] = item["name"] if item["name"]
-          update_item["price"] = item["price"] if item["price"]
-          update_item["priceType"] = item["priceType"] if item["priceType"]
-          update_item["hidden"] = item["hidden"] if item.key?("hidden")
-          update_item["available"] = item["available"] if item.key?("available")
-          update_item["defaultTaxRates"] = item["defaultTaxRates"] if item.key?("defaultTaxRates")
-          update_item["cost"] = item["cost"] if item.key?("cost")
-          update_item["isRevenue"] = item["isRevenue"] if item.key?("isRevenue")
-
-          # Add to our bulk update array
-          bulk_items << update_item
-        end
-
-        if bulk_items.empty?
-          logger.warn "No items to update in bulk assignment"
-          return { success: false, updated_count: 0, assigned_count: 0, errors: ["No items to update"] }
-        end
-
-        # Perform the bulk update with properly formatted items
-        begin
-          logger.info "Sending bulk update with #{bulk_items.size} items"
-          response = bulk_update_items(bulk_items)
-
-          # The response appears to be an array directly, not a hash with 'elements' key
-          if response.is_a?(Array)
-            successful_count = response.size
-            logger.info "✅ Successfully updated #{successful_count} items with category assignments"
-            {
-              success: true,
-              updated_count: successful_count,
-              assigned_count: successful_count,
-              errors: []
-            }
-          elsif response && response["elements"] && response["elements"].is_a?(Array)
-            # As a fallback, also try the original format
-            successful_count = response["elements"].size
-            logger.info "✅ Successfully updated #{successful_count} items with category assignments"
-            {
-              success: true,
-              updated_count: successful_count,
-              assigned_count: successful_count,
-              errors: []
-            }
-          else
-            logger.error "❌ Bulk update failed: #{response.inspect}"
-            {
-              success: false,
-              updated_count: 0,
-              assigned_count: 0,
-              errors: ["Bulk update failed: #{response.inspect}"]
-            }
-          end
-        rescue StandardError => e
-          logger.error "❌ Exception during bulk update: #{e.message}"
-          logger.error e.backtrace.join("\n") if e.backtrace # Add stack trace for debugging
           {
-            success: false,
-            updated_count: 0,
-            assigned_count: 0,
-            errors: ["Exception during bulk update: #{e.message}"]
+            "id" => item_id,
+            "categories" => [{ "id" => category_id }],
+            "name" => item["name"],
+            "price" => item["price"],
+            "priceType" => item["priceType"] || "FIXED",
+            "hidden" => item["hidden"] || false,
+            "available" => item["available"] || true,
+            "defaultTaxRates" => item["defaultTaxRates"] || [],
+            "cost" => item["cost"] || 0,
+            "isRevenue" => item["isRevenue"] || true
           }
-        end
+        end.compact
+
+        response = bulk_update_items(bulk_items)
+        logger.info "Bulk assignment response: #{response.inspect}"
       end
 
       # Individual item-to-category assignment (fallback method)

@@ -1,0 +1,9 @@
+[
+  { "label": "Cash" },
+  { "label": "Credit Card" },
+  { "label": "Debit Card" },
+  { "label": "Gift Card" },
+  { "label": "Check" },
+  { "label": "Mobile Payment" },
+  { "label": "Store Credit" }
+]

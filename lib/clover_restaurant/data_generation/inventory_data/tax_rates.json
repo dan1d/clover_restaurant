@@ -1,0 +1,9 @@
+[
+  { "name": "Sales Tax", "rate": 7.5, "isDefault": true },
+  { "name": "State Tax", "rate": 5.0, "isDefault": false },
+  { "name": "Local Tax", "rate": 2.5, "isDefault": false },
+  { "name": "Federal Tax", "rate": 0.0, "isDefault": false },
+  { "name": "Service Charge", "rate": 15.0, "isDefault": false },
+  { "name": "Alcohol", "rate": 18.0, "isDefault": false },
+  { "name": "VAT", "rate": 10.0, "isDefault": false }
+]

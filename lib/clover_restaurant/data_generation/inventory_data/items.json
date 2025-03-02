@@ -1,0 +1,9 @@
+[
+  { "name": "Classic Burger", "price": 1295, "category": "Entrees" },
+  { "name": "Caesar Salad", "price": 995, "category": "Appetizers" },
+  { "name": "French Fries", "price": 495, "category": "Sides" },
+  { "name": "Chocolate Cake", "price": 795, "category": "Desserts" },
+  { "name": "Soda", "price": 295, "category": "Drinks" },
+  { "name": "Craft Beer", "price": 695, "category": "Alcoholic Beverages" },
+  { "name": "Chef's Special", "price": 1895, "category": "Specials" }
+]

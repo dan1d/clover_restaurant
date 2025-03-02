@@ -9,13 +9,11 @@ module CloverRestaurant
         # Initialize operation-related services
         @services = {
           employee: ::CloverRestaurant::Services::EmployeeService.new(@config),
-          reservation: ::CloverRestaurant::Services::ReservationService.new(@config),
           order: ::CloverRestaurant::Services::OrderService.new(@config),
           payment: ::CloverRestaurant::Services::PaymentService.new(@config),
           tip: ::CloverRestaurant::Services::TipService.new(@config),
           refund: ::CloverRestaurant::Services::RefundService.new(@config),
-          modifier: ::CloverRestaurant::Services::ModifierService.new(@config),
-          table: ::CloverRestaurant::Services::TableService.new(@config)
+          modifier: ::CloverRestaurant::Services::ModifierService.new(@config)
         }
       end
 
@@ -78,51 +76,7 @@ module CloverRestaurant
         { employees: todays_employees, shifts: shifts }
       end
 
-      def create_reservations_for_day(date, customers, tables)
-        log_info("Creating reservations for #{date}")
-
-        # Create 5-15 reservations for the day
-        reservation_count = rand(5..14)
-        created_reservations = []
-
-        reservation_count.times do
-          # Pick random customer
-          customer = customers.sample
-
-          # Pick random table
-          table = tables.sample
-
-          # Generate random time between 11 AM and 9 PM
-          hour = rand(11..21)
-          minute = [0, 15, 30, 45].sample
-
-          reservation_time = DateTime.parse("#{date}T#{hour}:#{minute}:00")
-
-          # Generate random party size
-          max_seats = table["maxSeats"] || 4
-          party_size = rand(1..max_seats)
-
-          # Create the reservation
-          reservation_data = {
-            "customer" => { "id" => customer["id"] },
-            "table" => { "id" => table["id"] },
-            "time" => reservation_time.to_time.to_i * 1000,
-            "partySize" => party_size,
-            "status" => "PENDING"
-          }
-
-          begin
-            reservation = services[:reservation].create_reservation(reservation_data)
-            created_reservations << reservation if reservation && reservation["id"]
-          rescue StandardError => e
-            log_error("Error creating individual reservation: #{e.message}")
-          end
-        end
-
-        created_reservations
-      end
-
-      def create_walk_in_orders(date, count, employees, customers, tables, inventory_items, discounts)
+      def create_walk_in_orders(date, count, employees, customers, inventory_items, discounts)
         log_info("Creating #{count} walk-in orders for #{date}")
 
         orders = []
@@ -132,7 +86,6 @@ module CloverRestaurant
           employee = employees.sample
           # 70% of orders have a customer, 30% are anonymous
           customer = rand < 0.7 ? customers.sample : nil
-          table = tables.sample
 
           # Create random time between 11 AM and 10 PM
           hour = rand(11..22)
@@ -205,13 +158,6 @@ module CloverRestaurant
                 end
               end
 
-              # Assign to table
-              begin
-                services[:table].assign_order_to_table(order["id"], table["id"])
-              rescue StandardError => e
-                log_error("Error assigning order #{order["id"]} to table: #{e.message}")
-              end
-
               # Calculate and update total
               begin
                 total = services[:order].calculate_order_total(order["id"])
@@ -227,110 +173,6 @@ module CloverRestaurant
             end
           rescue StandardError => e
             log_error("Error creating walk-in order: #{e.message}")
-          end
-        end
-
-        orders
-      end
-
-      def create_reservation_orders(date, reservations, employees, inventory_items)
-        log_info("Creating orders for #{reservations.size} reservations on #{date}")
-
-        orders = []
-
-        reservations.each do |reservation|
-          next unless reservation && reservation["customer"] && reservation["customer"]["id"]
-
-          begin
-            # Mark reservation as seated
-            services[:reservation].check_in_reservation(reservation["id"])
-
-            # Get customer and table from reservation
-            customer_id = reservation["customer"]["id"]
-            table_id = reservation["table"] ? reservation["table"]["id"] : nil
-
-            # Get random employee
-            employee = employees.sample
-
-            # Create time based on reservation time (plus 15 min)
-            reservation_time = Time.at(reservation["time"] / 1000) + 15 * 60
-            timestamp = reservation_time.to_i * 1000
-
-            # Create order
-            order_data = {
-              "createdTime" => timestamp,
-              "state" => "OPEN",
-              "customer" => { "id" => customer_id },
-              "employee" => { "id" => employee["id"] }
-            }
-
-            order = services[:order].create_order(order_data)
-
-            if order && order["id"]
-              # Add items to order based on party size (roughly 1.5 items per person)
-              party_size = reservation["partySize"] || 2
-              item_count = (party_size * 1.5).round
-              item_count = [item_count, 1].max
-              selected_items = inventory_items.sample(item_count)
-
-              selected_items.each do |item|
-                # Random quantity (mostly 1, occasionally more)
-                quantity = rand < 0.8 ? 1 : rand(1..2)
-
-                begin
-                  line_item = services[:order].add_line_item(order["id"], item["id"], quantity)
-
-                  # Randomly add modifications
-                  if rand < 0.4 # 40% chance
-                    # Get modifier groups for this item
-                    item_modifier_groups = services[:modifier].get_item_modifier_groups(item["id"])
-
-                    if item_modifier_groups && item_modifier_groups["elements"] && !item_modifier_groups["elements"].empty?
-                      # Select a random modifier group
-                      modifier_group = item_modifier_groups["elements"].sample
-
-                      # Get modifiers for this group
-                      modifiers = services[:modifier].get_modifiers(modifier_group["id"])
-
-                      if modifiers && modifiers["elements"] && !modifiers["elements"].empty?
-                        # Add a random modifier
-                        modifier = modifiers["elements"].sample
-                        services[:order].add_modification(order["id"], line_item["id"], modifier["id"])
-                      end
-                    end
-                  end
-                rescue StandardError => e
-                  log_error("Error adding line item to reservation order #{order["id"]}: #{e.message}")
-                end
-              end
-
-              # Assign to table
-              if table_id
-                begin
-                  services[:table].assign_order_to_table(order["id"], table_id)
-                rescue StandardError => e
-                  log_error("Error assigning order #{order["id"]} to table: #{e.message}")
-                end
-              end
-
-              # Calculate and update total
-              begin
-                total = services[:order].calculate_order_total(order["id"])
-                services[:order].update_order_total(order["id"], total)
-
-                # Get the updated order with total
-                updated_order = services[:order].get_order(order["id"])
-                orders << updated_order if updated_order
-              rescue StandardError => e
-                log_error("Error calculating total for order #{order["id"]}: #{e.message}")
-                orders << order # Use the original order object
-              end
-
-              # Mark reservation as completed
-              services[:reservation].complete_reservation(reservation["id"])
-            end
-          rescue StandardError => e
-            log_error("Error creating order for reservation #{reservation["id"]}: #{e.message}")
           end
         end
 

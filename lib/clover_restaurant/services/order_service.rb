@@ -10,6 +10,18 @@ module CloverRestaurant
         make_request(:get, endpoint("orders"), nil, query_params)
       end
 
+      def update_order_state(order_id, state)
+        logger.info "🔄 Updating order #{order_id} state to #{state}..."
+        payload = { "state" => state }
+        response = make_request(:post, endpoint("orders/#{order_id}"), payload)
+
+        if response
+          logger.info "✅ Order #{order_id} updated to state: #{state}"
+        else
+          logger.error "❌ Failed to update order #{order_id} state."
+        end
+      end
+
       def get_order(order_id)
         logger.info "=== Fetching order #{order_id} for merchant #{@config.merchant_id} ==="
         make_request(:get, endpoint("orders/#{order_id}"))
@@ -18,16 +30,60 @@ module CloverRestaurant
       def create_order(order_data = {})
         logger.info "=== Creating a new order for merchant #{@config.merchant_id} ==="
 
-        # Create order
+        # # Ensure unique order creation
+        # existing_orders = get_orders(100, 0)
+        # similar_order = existing_orders["elements"]&.find do |order|
+        #   order["employee"]["id"] == order_data["employee"]["id"] &&
+        #     order["customers"]&.any? { |c| c["id"] == order_data["customers"].first["id"] }
+        # end
+
+        # if similar_order
+        #   logger.info "✅ Found existing order (#{similar_order["id"]}). Skipping creation."
+        #   return similar_order
+        # end
+
         order = make_request(:post, endpoint("orders"), order_data)
         return nil unless order && order["id"]
 
         order_id = order["id"]
+        total_price = 0
 
-        # ✅ Mark order as paid (but DO NOT create payment here)
-        update_order(order_id, { "paymentState" => "PAID" })
+        # Select random items
+        items = begin
+          @services_manager.inventory.get_items["elements"]
+        rescue StandardError
+          []
+        end
 
-        logger.info "✅ Order #{order_id} marked as PAID."
+        num_items = rand(1..4)
+        selected_items = items.sample(num_items)
+
+        selected_items.each do |item|
+          quantity = rand(1..2)
+          total_price += (item["price"] || 0) * quantity
+          add_line_item(order_id, item["id"], quantity)
+        end
+
+        # Apply discount randomly
+        discounts = begin
+          @services_manager.discount.get_discounts["elements"]
+        rescue StandardError
+          []
+        end
+        if rand < 0.4 && !discounts.empty?
+          discount = discounts.sample
+          apply_discount(order_id, discount["id"])
+        end
+
+        # Finalize order total
+        total = calculate_order_total(order_id)
+        update_order_total(order_id, total)
+
+        # Process payment after order creation
+        payment_service = @services_manager.payment
+        payment_service.process_payment(order_id, total, order_data["employee"]["id"], order_data["clientCreatedTime"])
+
+        logger.info "✅ Order #{order_id} created with total: #{total / 100.0} USD from 1 month ago"
         order
       end
 
@@ -108,12 +164,36 @@ module CloverRestaurant
       end
 
       def apply_discount(order_id, discount_id)
+        return
         logger.info "=== Applying discount #{discount_id} to order #{order_id} ==="
 
-        # Construct the request payload
-        payload = { "discount" => { "id" => discount_id } }
+        # Fetch discount details to ensure we include the required fields
+        discounts = @services_manager.discount.get_discounts["elements"]
+        discount = discounts.find { |d| d["id"] == discount_id }
 
-        # Make the API request
+        unless discount
+          logger.error "❌ ERROR: Discount ID #{discount_id} not found in available discounts."
+          return nil
+        end
+
+        # Ensure payload includes either 'amount' or 'percentage'
+        payload = {
+          "discount" => {
+            "id" => discount["id"],
+            "name" => discount["name"]
+          }
+        }
+
+        # payload["discount"]["amount"] = rand(1..10) * 100
+        payload["discount"]["percentage"] = "%#{discount["percentage"]}" if discount["percentage"]
+
+        # API requires either amount or percentage
+        if payload["discount"]["amount"].nil? && payload["discount"]["percentage"].nil?
+          logger.error "❌ ERROR: Discount ID #{discount_id} is missing both amount and percentage."
+          payload["discount"]["amount"] = rand(1..10) * 100
+          logger.warn "⚠️ Using random amount: #{payload["discount"]["amount"]}"
+        end
+
         response = make_request(:post, endpoint("orders/#{order_id}/discounts"), payload)
 
         if response && response["id"]
@@ -179,18 +259,25 @@ module CloverRestaurant
       def add_service_charge(order_id, service_charge_data)
         logger.info "=== Adding service charge to order #{order_id} ==="
 
-        # Check if a similar service charge is already applied to the order
-        existing_charges = get_service_charges(order_id)
+        begin
+          # Ensure service charges are supported
+          service_charge_response = make_request(:get, endpoint("orders/#{order_id}/service_charges"))
 
-        if existing_charges && existing_charges["elements"] && service_charge_data["name"] && existing_charges["elements"].any? do |sc|
-          sc["name"] == service_charge_data["name"]
-        end
-          logger.info "Service charge '#{service_charge_data["name"]}' already applied to order #{order_id}, skipping"
-          return existing_charges["elements"].find { |sc| sc["name"] == service_charge_data["name"] }
-        end
+          if service_charge_response["status"] == 405
+            logger.warn "⚠️ Service charges not supported on this account. Skipping."
+            return
+          end
 
-        logger.info "Service charge data: #{service_charge_data.inspect}"
-        make_request(:post, endpoint("orders/#{order_id}/service_charges"), service_charge_data)
+          response = make_request(:post, endpoint("orders/#{order_id}/service_charges"), service_charge_data)
+
+          if response && response["id"]
+            logger.info "✅ Successfully added service charge: #{service_charge_data["name"]} to order #{order_id}"
+          else
+            logger.error "❌ Failed to add service charge: #{service_charge_data["name"]} to order #{order_id}"
+          end
+        rescue StandardError => e
+          logger.error "❌ Error adding service charge to order #{order_id}: #{e.message}"
+        end
       end
 
       def remove_service_charge(order_id, service_charge_id)
@@ -202,67 +289,77 @@ module CloverRestaurant
         logger.info "=== Calculating total for order #{order_id} ==="
         order = get_order(order_id)
 
-        return 0 unless order && order["lineItems"] && order["lineItems"]["elements"]
+        unless order && order["lineItems"] && order["lineItems"]["elements"]
+          logger.error "❌ No line items found for order #{order_id}."
+          return 0
+        end
 
         total = 0
 
         # Calculate line items total
         order["lineItems"]["elements"].each do |line_item|
-          item_total = line_item["price"]
+          item_price = line_item["price"] || 0
+          quantity = line_item["quantity"] || 1
+          item_total = item_price * quantity
 
-          # Add modifications
+          logger.info "Line item: #{line_item["name"]} (ID: #{line_item["id"]}), Price: #{item_price}, Quantity: #{quantity}, Subtotal: #{item_total}"
+
+          # Add modifications (if any)
           if line_item["modifications"] && line_item["modifications"]["elements"]
             line_item["modifications"]["elements"].each do |mod|
-              item_total += mod["price"]
+              mod_price = mod["price"] || 0
+              item_total += mod_price
+              logger.info "Modification: #{mod["name"]} (ID: #{mod["id"]}), Price: #{mod_price}"
             end
           end
-
-          # Multiply by quantity
-          item_total *= line_item["quantity"]
 
           total += item_total
         end
 
-        # Subtract discounts
+        logger.info "Subtotal before discounts/taxes: #{total}"
+
+        # Subtract discounts (if any)
         if order["discounts"] && order["discounts"]["elements"]
           order["discounts"]["elements"].each do |discount|
             if discount["percentage"]
               discount_amount = (total * discount["percentage"] / 100.0).round
               total -= discount_amount
+              logger.info "Applied percentage discount: #{discount["percentage"]}%, Amount: #{discount_amount}"
             else
-              total -= discount["amount"]
+              total -= discount["amount"] || 0
+              logger.info "Applied fixed discount: #{discount["amount"]}"
             end
           end
         end
 
-        # Add service charges
-        if order["serviceCharges"] && order["serviceCharges"]["elements"]
-          order["serviceCharges"]["elements"].each do |service_charge|
-            if service_charge["percentage"]
-              charge_amount = (total * service_charge["percentage"] / 100.0).round
-              total += charge_amount
-            else
-              total += service_charge["amount"]
-            end
-          end
-        end
+        logger.info "Total after discounts: #{total}"
 
-        # Calculate tax
+        # Add taxes (if any)
         if order["taxRates"] && order["taxRates"]["elements"]
           tax_total = 0
           order["taxRates"]["elements"].each do |tax_rate|
             tax_amount = (total * tax_rate["rate"] / 100.0).round
             tax_total += tax_amount
+            logger.info "Applied tax: #{tax_rate["rate"]}%, Amount: #{tax_amount}"
           end
           total += tax_total
         end
 
+        logger.info "Final total: #{total}"
         total
       end
 
       def update_order_total(order_id, total)
-        logger.info "=== Updating order #{order_id} total to #{total} ==="
-        make_request(:post, endpoint("orders/#{order_id}"), { "total" => total })
+        logger.info "🔄 Updating order #{order_id} total to #{total}..."
+
+        payload = { "total" => total }
+        response = make_request(:post, endpoint("orders/#{order_id}"), payload)
+
+        if response
+          logger.info "✅ Order #{order_id} updated successfully."
+        else
+          logger.error "❌ Failed to update order #{order_id}."
+        end
       end
 
       def void_order(order_id, reason = "Order voided")
@@ -333,11 +430,6 @@ module CloverRestaurant
         make_request(:get, endpoint("orders/#{order_id}/discounts"))
       end
 
-      def get_service_charges(order_id)
-        logger.info "=== Fetching service charges for order #{order_id} ==="
-        make_request(:get, endpoint("orders/#{order_id}/service_charges"))
-      end
-
       def add_note_to_order(order_id, note)
         logger.info "=== Adding note to order #{order_id} ==="
 
@@ -401,8 +493,8 @@ module CloverRestaurant
 
         # Apply discounts (40% chance)
         if order_id.hash % 10 < 4 && !discounts.empty?
-          discount = discounts.sample
-          apply_discount(order_id, discount["id"])
+          # discount = discounts.sample
+          # apply_discount(order_id, discount["id"])
         end
 
         # Calculate and update total

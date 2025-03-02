@@ -1,0 +1,9 @@
+[
+  { "name": "Appetizers" },
+  { "name": "Entrees" },
+  { "name": "Sides" },
+  { "name": "Desserts" },
+  { "name": "Drinks" },
+  { "name": "Alcoholic Beverages" },
+  { "name": "Specials" }
+]

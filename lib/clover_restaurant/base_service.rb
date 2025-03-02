@@ -6,6 +6,7 @@ module CloverRestaurant
 
     def initialize(custom_config = nil)
       @config = custom_config || CloverRestaurant.configuration
+      @services_manager = CloverRestaurant::CloverServicesManager.new
       @config.validate!
       @logger = @config.logger
 
@@ -40,7 +41,7 @@ module CloverRestaurant
 
       # Generate a unique cache key for this request
       cassette_name = generate_cassette_name(method, url, payload)
-
+      puts "PAYLOAD: #{payload}"
       # logger.info "Using VCR Cassette: #{cassette_name}"
 
       # response = VCR.use_cassette(cassette_name) do
