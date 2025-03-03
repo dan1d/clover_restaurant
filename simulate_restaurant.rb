@@ -20,19 +20,29 @@ require "fileutils"
 require "set"
 
 class CloverAutomation
-  attr_reader :services_manager, :entity_generator
+  attr_reader :services_manager, :entity_generator, :logger
 
   def initialize
     configure_clover
     @services_manager = CloverRestaurant::CloverServicesManager.new
     @entity_generator = CloverRestaurant::DataGeneration::EntityGenerator.new(@services_manager.config,
                                                                               @services_manager)
+    # Initialize the logger
+    @logger = Logger.new($stdout)
+    @logger.level = Logger::INFO
   end
 
   def run
     display_header
+
     setup_entities
     generate_past_orders
+  end
+
+  def delete_everything
+    puts "\n🚨 Deleting all Clover entities...".colorize(:light_blue)
+    @entity_generator.delete_all_entities
+    puts "✅ All Clover entities deleted successfully."
   end
 
   private
@@ -57,6 +67,7 @@ class CloverAutomation
 
   def setup_entities
     puts "\n🔄 Setting up Clover entities...".colorize(:light_blue)
+    # @entity_generator.cleanup_entities
     @entity_generator.create_entities
     @services_manager.tender.create_standard_tenders
     puts "✅ Clover setup complete."
@@ -120,31 +131,38 @@ class CloverAutomation
 
         order_id = order["id"]
 
+        # Randomly select items for the order
+        selected_items = items.sample(rand(1..5)) # Select 1 to 5 random items
+        total_price = 0
+
         # Add line items to the order
         selected_items.each do |item|
           quantity = rand(1..2)
           total_price += (item["price"] || 0) * quantity
           @services_manager.order.add_line_item(order_id, item["id"], quantity)
-          logger.info "Added item #{item["id"]} with price #{item["price"]} and quantity #{quantity}"
+          @logger.info "Added item #{item["id"]} with price #{item["price"]} and quantity #{quantity}"
         end
 
         # Apply discount (if applicable)
         if rand < 0.4 && !discounts.empty?
           discount = discounts.sample
           @services_manager.order.apply_discount(order_id, discount["id"])
-          logger.info "Applied discount #{discount["id"]} to order #{order_id}"
+          @logger.info "Applied discount #{discount["id"]} to order #{order_id}"
         end
 
         # Calculate and update the order total
         total = @services_manager.order.calculate_order_total(order_id)
-        logger.info "Calculated total for order #{order_id}: #{total}"
+        @logger.info "Calculated total for order #{order_id}: #{total}"
 
         # Update the order total
         @services_manager.order.update_order_total(order_id, total)
-        logger.info "Updated order #{order_id} total to #{total}"
+        @logger.info "Updated order #{order_id} total to #{total}"
 
         # Skip payment if the total is zero
-        next if total.zero?
+        if total.zero?
+          @logger.warn "Order #{order_id} has a total of 0. Skipping payment."
+          next
+        end
 
         # Update the order state to OPEN
         @services_manager.order.update_order_state(order_id, "OPEN")

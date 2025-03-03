@@ -33,6 +33,7 @@ require "clover_restaurant/services/tender_service"
 require "clover_restaurant/services/tip_service"
 require "clover_restaurant/services/device_service"
 # Data Generation (adjust paths to match your structure)
+require "clover_restaurant/data_generation/delete_all"
 require "clover_restaurant/data_generation/base_generator"
 require "clover_restaurant/data_generation/daily_operation_generator"
 require "clover_restaurant/data_generation/entity_generator"

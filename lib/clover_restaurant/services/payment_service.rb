@@ -18,6 +18,35 @@ module CloverRestaurant
         }
       end
 
+      def get_payments
+        logger.info "🔄 Fetching all payments..."
+
+        response = make_request(:get, endpoint("payments"))
+
+        if response && response["elements"] && response["elements"] != []
+          logger.info "✅ Fetched #{response["elements"].size} payments."
+          response["elements"]
+        else
+          logger.error "❌ Failed to fetch payments: #{response.inspect}"
+          []
+        end
+      end
+
+      def delete_all_payments
+        logger.info "🚨 Deleting all payments..."
+
+        payments = get_payments
+        [payments].flatten.compact.each do |payment|
+          response = make_request(:delete, endpoint("payments/#{payment["id"]}"))
+
+          if response
+            logger.info "✅ Payment deleted: #{payment["id"]}"
+          else
+            logger.error "❌ Failed to delete payment: #{payment["id"]}"
+          end
+        end
+      end
+
       def encryptor
         @encryptor ||= begin
           pay_key = get_pay_key

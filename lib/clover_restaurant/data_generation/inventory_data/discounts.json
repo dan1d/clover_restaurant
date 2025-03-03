@@ -1,0 +1,17 @@
+[
+  {
+    "name": "10% Off",
+    "rate": 10,
+    "isDefault": false
+  },
+  {
+    "name": "20% Off",
+    "rate": 20,
+    "isDefault": false
+  },
+  {
+    "name": "5% Off",
+    "rate": 5,
+    "isDefault": true
+  }
+]

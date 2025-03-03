@@ -27,6 +27,31 @@ module CloverRestaurant
         make_request(:delete, endpoint("categories/#{category_id}"))
       end
 
+      def delete_all_categories_and_items
+        logger.info "Deleting all categories and items for merchant #{@config.merchant_id}"
+
+        # First get all categories
+        categories_response = get_categories
+        return false unless categories_response && categories_response["elements"]
+
+        # Delete each category and its items
+        categories_response["elements"].each do |category|
+          category_id = category
+          delete_category(category_id)
+        end
+
+        # now delete all items
+        items_response = get_items
+        return false unless items_response && items_response["elements"]
+
+        items_response["elements"].each do |item|
+          item_id = item["id"]
+          delete_item(item_id)
+        end
+
+        true
+      end
+
       def get_items(limit = 100, offset = 0)
         logger.info "Fetching items for merchant #{@config.merchant_id}"
         make_request(:get, endpoint("items"), nil, { limit: limit, offset: offset })
@@ -44,19 +69,22 @@ module CloverRestaurant
         data_to_send = item_data.dup
 
         # Make sure there's a price (required field)
-        data_to_send["price"] ||= 0
+        data_to_send["price"] ||= rand(500..2000) # Random price between $5 and $20
 
         # Ensure price is an integer (cents)
         data_to_send["price"] = (data_to_send["price"] * 100).to_i if data_to_send["price"].is_a?(Float)
 
         # Add default fields if not provided
-        data_to_send["cost"] ||= 0
+        data_to_send["cost"] ||= rand(100..500) # Random cost between $1 and $5
         data_to_send["priceType"] ||= "FIXED"
         data_to_send["stockCount"] ||= nil # null means unlimited
         data_to_send["isRevenue"] = true unless data_to_send.key?("isRevenue")
 
+        # Include categories if provided
+        data_to_send["categories"] = item_data["categories"] if item_data["categories"]
+        # byebug if item_data["categories"]
         logger.info "Item data to send: #{data_to_send.inspect}"
-        response = make_request(:post, endpoint("items"), data_to_send)
+        response = make_request(:post, endpoint("items"), data_to_send, { expand: "categories" })
 
         if response && response["id"]
           logger.info "✅ Successfully created item '#{response["name"]}' with ID: #{response["id"]}"
@@ -69,7 +97,15 @@ module CloverRestaurant
 
       def update_item(item_id, item_data)
         logger.info "Updating item #{item_id} for merchant #{@config.merchant_id}"
-        make_request(:post, endpoint("items/#{item_id}"), item_data)
+
+        # Prepare the payload
+        payload = item_data.dup
+
+        # Ensure required fields are included
+        payload["id"] = item_id
+
+        logger.info "Update payload: #{payload.inspect}"
+        make_request(:post, endpoint("items/#{item_id}"), payload, { expand: "categories" })
       end
 
       def delete_item(item_id)
@@ -82,27 +118,22 @@ module CloverRestaurant
         make_request(:get, endpoint("categories/#{category_id}/items"), nil, { limit: limit, offset: offset })
       end
 
-      # BULK OPERATIONS
-
-      # Bulk update items using PUT to the /bulk_items endpoint
       def bulk_update_items(items_data)
-        def bulk_update_items(items_data)
-          logger.info "Performing bulk update of #{items_data.size} items for merchant #{@config.merchant_id}"
+        logger.info "Performing bulk update of #{items_data.size} items for merchant #{@config.merchant_id}"
 
-          # Prepare the payload with the items array
-          payload = {
-            "items" => items_data
-          }
+        # Prepare the payload with the items array
+        payload = {
+          "items" => items_data
+        }
 
-          # Make the PUT request to the bulk_items endpoint
-          response = make_request(:put, endpoint("bulk_items"), payload)
+        # Make the PUT request to the bulk_items endpoint
+        response = make_request(:put, endpoint("bulk_items"), payload)
 
-          if response.is_a?(Array)
-            # Wrap the array in a hash to match the expected format
-            { "elements" => response }
-          else
-            response
-          end
+        if response.is_a?(Array)
+          # Wrap the array in a hash to match the expected format
+          { "elements" => response }
+        else
+          response
         end
       end
 
@@ -110,9 +141,14 @@ module CloverRestaurant
       # Add this to lib/clover_restaurant/services/inventory_service.rb
 
       def bulk_assign_categories(item_category_mapping)
+        logger.info "Starting bulk category assignment for #{item_category_mapping.size} items"
+
         bulk_items = item_category_mapping.map do |item_id, category_id|
           item = get_item(item_id)
-          next unless item
+          unless item
+            logger.error "❌ Item #{item_id} not found, skipping"
+            next
+          end
 
           {
             "id" => item_id,
@@ -128,60 +164,77 @@ module CloverRestaurant
           }
         end.compact
 
+        if bulk_items.empty?
+          logger.error "❌ No valid items found for bulk assignment"
+          return { success: false, error: "No valid items found" }
+        end
+
+        logger.info "Prepared bulk items payload: #{bulk_items.inspect}"
+
         response = bulk_update_items(bulk_items)
-        logger.info "Bulk assignment response: #{response.inspect}"
+        if response && response["elements"]
+          logger.info "✅ Successfully assigned categories to #{response["elements"].size} items"
+          { success: true, updated_count: response["elements"].size }
+        else
+          logger.warn "⚠️ Bulk assignment failed, falling back to individual assignments"
+
+          # Fall back to individual assignments
+          success_count = 0
+          failure_count = 0
+
+          item_category_mapping.each do |item_id, category_id|
+            assign_item_to_category(item_id, category_id)
+            success_count += 1
+          rescue StandardError => e
+            logger.error "❌ Failed to assign item #{item_id} to category #{category_id}: #{e.message}"
+            failure_count += 1
+          end
+
+          {
+            success: success_count > 0,
+            updated_count: success_count,
+            failure_count: failure_count
+          }
+        end
       end
 
       # Individual item-to-category assignment (fallback method)
       def assign_item_to_category(item_id, category_id)
-        logger.info "Assigning item #{item_id} to category #{category_id}"
+        log_info("🔄 Assigning item #{item_id} to category #{category_id}...")
 
         # Get the current item data
-        item = get_item(item_id)
-        return nil unless item
-
-        # Create the updated categories array
-        categories_array = []
-
-        # Include existing categories if any
-        if item["categories"] && !item["categories"].empty?
-          categories_array = item["categories"].map { |c| { "id" => c["id"] } }
-
-          # Check if the item already has this category
-          if item["categories"].any? { |c| c["id"] == category_id }
-            logger.info "Item #{item_id} already assigned to category #{category_id}, skipping"
-            return item
-          end
+        item = @services[:inventory].get_item(item_id)
+        unless item
+          log_error("❌ Item #{item_id} not found, skipping")
+          return nil
         end
 
-        # Add the new category
-        categories_array << { "id" => category_id }
+        # Get the category data
+        category = @services[:inventory].get_category(category_id)
+        unless category
+          log_error("❌ Category #{category_id} not found, skipping")
+          return nil
+        end
 
-        # Prepare item data for update
-        update_data = {
+        # Prepare the payload for assigning the category
+        payload = {
           "id" => item_id,
-          "categories" => categories_array,
-          "name" => item["name"],
-          "price" => item["price"]
+          "categories" => [
+            {
+              "id" => category_id,
+              "name" => category["name"] # Include the category name
+            }
+          ]
         }
 
-        # Include other important fields
-        update_data["priceType"] = item["priceType"] if item["priceType"]
-        update_data["hidden"] = item["hidden"] if item.key?("hidden")
-        update_data["available"] = item["available"] if item.key?("available")
-        update_data["defaultTaxRates"] = item["defaultTaxRates"] if item.key?("defaultTaxRates")
-        update_data["cost"] = item["cost"] if item.key?("cost")
-        update_data["isRevenue"] = item["isRevenue"] if item.key?("isRevenue")
-
-        # Use the bulk update endpoint with a single item (more reliable)
-        bulk_response = bulk_update_items([update_data])
-
-        if bulk_response && bulk_response["elements"] && bulk_response["elements"].any?
-          logger.info "✅ Successfully assigned item #{item_id} to category #{category_id}"
-          bulk_response["elements"].first
+        # Update the item with the new category
+        updated_item = @services[:inventory].update_item(item_id, payload, { expand: "categories" })
+        if updated_item
+          log_info("✅ Successfully assigned item #{item_id} to category #{category["name"]}")
+          updated_item
         else
-          logger.warn "⚠️ Bulk update failed, falling back to direct update"
-          update_item(item_id, { "categories" => categories_array })
+          log_error("❌ Failed to assign item #{item_id} to category #{category["name"]}")
+          nil
         end
       end
 
