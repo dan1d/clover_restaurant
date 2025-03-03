@@ -1,3 +1,4 @@
+require "pry"
 module CloverRestaurant
   module DataGeneration
     class BaseGenerator
@@ -10,8 +11,6 @@ module CloverRestaurant
         # Initialize all services
         @services = {}
       end
-
-      protected
 
       def log_info(message)
         logger.info(message)

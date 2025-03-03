@@ -9,22 +9,10 @@ module CloverRestaurant
       def initialize(custom_config = nil, services_manager)
         super(custom_config)
         @services_manager = services_manager
-
-        @services = {
-          inventory: @services_manager.inventory,
-          modifier: @services_manager.modifier,
-          employee: @services_manager.employee,
-          customer: @services_manager.customer,
-          discount: @services_manager.discount,
-          tax: @services_manager.tax
-        }
-
-        @entity_cache = {}
+        @services = initialize_services
       end
 
       def cleanup_entities
-        # use CloverRestaurant::DataGeneration::DeleteAll
-        # to delete all entities
         CloverRestaurant::DataGeneration::DeleteAll.new(@config, @services_manager).delete_all_entities
       end
 
@@ -33,286 +21,140 @@ module CloverRestaurant
 
         # ✅ Step 1: Fetch Existing Data
         existing_inventory = fetch_existing_inventory
-        existing_categories = existing_inventory[:categories] || []
-        existing_items = existing_inventory[:items] || []
-
         existing_customers = fetch_existing_customers
         existing_employees = fetch_existing_employees
         existing_discounts = fetch_existing_discounts
         existing_tax_rates = fetch_existing_taxes
 
         # ✅ Step 2: Create Missing Data
-        # Only create inventory if we don't have enough items
-        inventory = if existing_items.length > 1
-                      { categories: existing_categories, items: existing_items }
-                    else
-                      create_inventory(existing_categories)
-                    end
-
-        customers = existing_customers.empty? ? create_customers(30) : existing_customers
-        employees = existing_employees.empty? ? create_employees_and_roles : existing_employees
-        discounts = existing_discounts.empty? ? create_discounts : existing_discounts
-        tax_rates = existing_tax_rates.empty? || existing_tax_rates.length <= 1 ? create_tax_rates : existing_tax_rates
+        inventory = ensure_inventory(existing_inventory)
+        customers = ensure_customers(existing_customers, 30)
+        employees = ensure_employees(existing_employees)
+        discounts = ensure_discounts(existing_discounts)
+        tax_rates = ensure_tax_rates(existing_tax_rates)
 
         log_info("✅ Entity creation complete!")
 
+        { inventory:, customers:, employees:, discounts:, tax_rates: }
+      end
+
+      private
+
+      ### **🔹 Service Initialization**
+      def initialize_services
         {
-          inventory: inventory,
-          customers: customers,
-          employees: employees,
-          discounts: discounts,
-          tax_rates: tax_rates
+          inventory: @services_manager.inventory,
+          modifier: @services_manager.modifier,
+          employee: @services_manager.employee,
+          customer: @services_manager.customer,
+          discount: @services_manager.discount,
+          tax: @services_manager.tax
         }
       end
 
-      def create_discounts
-        log_info("🔄 Creating discounts from JSON file...")
-
-        # Load discounts from JSON
-        discounts_json_path = File.join(INVENTORY_DATA_PATH, "discounts.json")
-        discounts_data = JSON.parse(File.read(discounts_json_path))
-
-        # Fetch existing discounts
-        existing_discounts = fetch_existing_discounts
-
-        # Check if there are fewer than the required number of discounts
-        if existing_discounts.size < discounts_data.size
-          log_info("⚠️ Found #{existing_discounts.size} discounts. Creating default discounts...")
-
-          # Create discounts
-          created_discounts = []
-          discounts_data.each do |discount_data|
-            discount = @services[:discount].create_discount({
-                                                              "name" => discount_data["name"],
-                                                              "rate" => discount_data["rate"],
-                                                              "isDefault" => discount_data["isDefault"]
-                                                            })
-
-            if discount && discount["id"]
-              log_info("✅ Created discount: #{discount["name"]} (ID: #{discount["id"]})")
-              created_discounts << discount
-            else
-              log_error("❌ Failed to create discount: #{discount_data["name"]}")
-            end
-          end
-
-          created_discounts
-        else
-          log_info("✅ Found #{existing_discounts.size} existing discounts, skipping creation.")
-          existing_discounts
+      ### **🔹 Inventory Handling**
+      def ensure_inventory(existing_inventory)
+        if existing_inventory[:categories].size > 1 && existing_inventory[:items].size > 1
+          log_info("✅ Found existing inventory. Ensuring all items are categorized.")
+          ensure_items_have_categories(existing_inventory[:items], existing_inventory[:categories])
+          return existing_inventory
         end
+
+        create_inventory(existing_inventory)
       end
 
-      def get_category(category)
-        {
-          "name" => category["name"],
-          "id" => category["id"]
-        }
+      def fetch_existing_inventory
+        log_info("🔍 Fetching existing inventory from Clover API...")
+        categories = safe_api_call { @services[:inventory].get_categories(100) } || []
+        items = safe_api_call { @services[:inventory].get_items(100) } || []
+
+        { categories:, items: }
       end
 
-      # Generate inventory from JSON files
-      def create_inventory(existing_categories = [])
+      def create_inventory(existing_inventory)
         log_info("🔄 Creating inventory from JSON files...")
 
-        # Load items from JSON
-        items_json_path = File.join(INVENTORY_DATA_PATH, "items.json")
-        items_data = JSON.parse(File.read(items_json_path))
+        items_data = existing_inventory[:items] || load_json("items.json")
+        category_names = items_data.map { |item| item["category"] }.uniq
 
-        # Use existing categories or create new ones
-        created_categories = existing_categories
-        if existing_categories.empty? || existing_categories.length < 1
-          # Extract unique categories from items data
-          category_names = items_data.map { |item| item["category"] }.uniq
-          log_info("📂 Found categories in items.json: #{category_names.join(", ")}")
+        created_categories = ensure_categories(category_names, existing_inventory[:categories])
+        created_items = create_items(items_data, created_categories)
 
-          # Create categories in Clover
-          created_categories = create_categories(category_names)
-          log_info("✅ Created categories: #{created_categories.map { |c| c["name"] }.join(", ")}")
-        else
-          log_info("✅ Using #{existing_categories.size} existing categories.")
-        end
-
-        # Create items and assign to categories
-        created_items = []
-        items_data.each do |item_data|
-          # Find matching category for this item
-          category = nil
-          category = created_categories.find { |c| c["name"] == item_data["category"] } if item_data["category"]
-
-          # Use a random category if no specific match found
-          category ||= created_categories.sample
-
-          # Create the item with category assignment
-          item = create_item_with_category(item_data, category["id"])
-
-          created_items << item if item
-        end
-
-        log_info("✅ Created #{created_items.size} items with category assignments.")
-
-        {
-          categories: created_categories,
-          items: created_items
-        }
+        { categories: created_categories, items: created_items }
       end
 
-      # Create categories in Clover
-      def create_categories(category_names)
-        log_info("🔄 Creating categories...")
+      def ensure_categories(category_names, existing_categories)
+        return existing_categories unless existing_categories.empty?
 
         category_names.map do |name|
           category = @services[:inventory].create_category({ "name" => name })
-          if category && category["id"]
-            log_info("✅ Created category: #{name} (ID: #{category["id"]})")
-            category
-          else
-            log_error("❌ Failed to create category: #{name}")
-            nil
-          end
+          category || log_error("❌ Failed to create category: #{name}")
         end.compact
       end
 
-      # Create an item and assign it to a category
-      def create_item_with_category(item_data, category_id)
-        log_info("🔄 Creating item: #{item_data["name"]}...")
+      def create_items(items_data, categories)
+        items_data.map do |item_data|
+          category = categories.find { |c| c["name"] == item_data["category"] }
+          next log_error("❌ Category not found for item: #{item_data["name"]}") unless category
 
-        # Create the item
-        item = @services[:inventory].create_item({
-                                                   "name" => item_data["name"],
-                                                   "price" => item_data["price"],
-                                                   "priceType" => "FIXED",
-                                                   "defaultTaxRates" => true,
-                                                   "cost" => 0,
-                                                   "isRevenue" => true,
-                                                   "categories" => [{ "id" => category_id }]
-                                                 })
+          @services[:inventory].assign_item_to_category(item_data["id"], category)
+        end.compact
+      end
 
-        if item && item["id"]
-          log_info("✅ Created item: #{item["name"]} with category ID: #{category_id}")
-          item
-        else
-          log_error("❌ Failed to create item: #{item_data["name"]}")
-          nil
+      ### **🔹 Ensure Items Have Categories**
+      def ensure_items_have_categories(items, categories)
+        categories = categories["elements"]
+
+        uncategorized_items = items["elements"].select { |item| !item["categories"] || item["categories"].empty? }
+        return if uncategorized_items.empty?
+
+        binding.pry
+        log_info("⚠️ Found #{uncategorized_items.size} uncategorized items. Assigning categories...")
+
+        # Ensure there is at least one category
+        if categories.empty?
+          log_info("⚠️ No categories found! Creating a default category...")
+          categories << create_default_category
+        end
+
+        # Assign categories to uncategorized items
+        item_category_mapping = {}
+        uncategorized_items.each do |item|
+          category = categories.sample
+          item_category_mapping[item["id"]] = category["id"]
+          result = @services[:inventory].assign_item_to_category(item["id"], category)
+
+          if result
+            log_info("✅ Successfully assigned categories to #{result[:updated_count]} items")
+          else
+            log_info("⚠️ Bulk assignment had issues. Falling back to individual assignments...")
+          end
         end
       end
 
-      ## ✅ New: Fetch Existing Customers
+      def create_default_category
+        log_info("🔄 Creating a default 'Miscellaneous' category...")
+
+        category = @services[:inventory].create_category({ "name" => "Miscellaneous" })
+        category || log_error("❌ Failed to create default category")
+      end
+
+      ### **🔹 Customer Handling**
+      def ensure_customers(existing_customers, count)
+        return existing_customers unless existing_customers.empty?
+
+        create_customers(count)
+      end
+
       def fetch_existing_customers
         log_info("🔍 Fetching existing customers from Clover API...")
-        customers = begin
-          @services[:customer].get_customers(100)
-        rescue StandardError
-          []
-        end
-        return customers["elements"] if customers && customers["elements"]
-
-        []
+        safe_api_call { @services[:customer].get_customers(100) } || []
       end
 
-      ## ✅ New: Fetch Existing Employees
-      def fetch_existing_employees
-        log_info("🔍 Fetching existing employees from Clover API...")
-        employees = begin
-          @services[:employee].get_employees(100)
-        rescue StandardError
-          []
-        end
-        return employees["elements"] if employees && employees["elements"]
-
-        []
-      end
-
-      ## ✅ New: Fetch Existing Inventory (Categories & Items)
-      def fetch_existing_inventory
-        log_info("🔍 Fetching existing inventory (categories & items) from Clover API...")
-
-        categories = begin
-          @services[:inventory].get_categories(100)
-        rescue StandardError
-          []
-        end
-        items = begin
-          @services[:inventory].get_items(100)
-        rescue StandardError
-          []
-        end
-
-        categories = categories["elements"] if categories && categories["elements"]
-        items = items["elements"] if items && items["elements"]
-
-        { categories: categories || [], items: items || [] }
-      end
-
-      ## ✅ New: Fetch Existing Discounts
-      def fetch_existing_discounts
-        log_info("🔍 Fetching existing discounts from Clover API...")
-        discounts = begin
-          @services[:discount].get_discounts(100)
-        rescue StandardError
-          []
-        end
-        return discounts["elements"] if discounts && discounts["elements"]
-
-        []
-      end
-
-      def create_tax_rates
-        log_info("🔄 Creating tax rates from JSON file...")
-
-        # Load tax rates from JSON
-        tax_rates_json_path = File.join(INVENTORY_DATA_PATH, "tax_rates.json")
-        tax_rates_data = JSON.parse(File.read(tax_rates_json_path))
-
-        # Fetch existing tax rates
-        existing_tax_rates = fetch_existing_taxes
-
-        # Check if there are fewer than 1 tax rates (excluding NO_TAX_APPLIED)
-        if existing_tax_rates.size <= 1
-          log_info("⚠️ Found #{existing_tax_rates.size} tax rates. Creating default tax rates...")
-
-          # Create tax rates
-          created_tax_rates = []
-          tax_rates_data.each do |tax_rate_data|
-            tax_rate = @services[:tax].create_tax_rate({
-                                                         "name" => tax_rate_data["name"],
-                                                         "rate" => tax_rate_data["rate"],
-                                                         "isDefault" => tax_rate_data["isDefault"]
-                                                       })
-
-            if tax_rate && tax_rate["id"]
-              log_info("✅ Created tax rate: #{tax_rate["name"]} (ID: #{tax_rate["id"]})")
-              created_tax_rates << tax_rate
-            else
-              log_error("❌ Failed to create tax rate: #{tax_rate_data["name"]}")
-            end
-          end
-
-          created_tax_rates
-        else
-          log_info("✅ Found #{existing_tax_rates.size} existing tax rates, skipping creation.")
-          existing_tax_rates
-        end
-      end
-
-      ## ✅ New: Fetch Existing Tax Rates
-      def fetch_existing_taxes
-        log_info("🔍 Fetching existing tax rates from Clover API...")
-        tax_rates = begin
-          @services[:tax].get_tax_rates(100)
-        rescue StandardError
-          []
-        end
-        return tax_rates["elements"] if tax_rates && tax_rates["elements"]
-
-        []
-      end
-
-      # Create customers
-      def create_customers(count = 30)
+      def create_customers(count)
         log_info("🔄 Creating #{count} customers...")
 
-        customers = []
-        count.times do |i|
+        count.times.map do |i|
           customer_data = {
             "firstName" => "Customer#{i + 1}",
             "lastName" => "LastName#{i + 1}",
@@ -320,17 +162,84 @@ module CloverRestaurant
             "phone" => "555-555-5555",
             "marketingAllowed" => false
           }
+          @services[:customer].create_customer(customer_data)
+        end.compact
+      end
 
-          customer = @services[:customer].create_customer(customer_data)
-          if customer && customer["id"]
-            log_info("✅ Created customer: #{customer["firstName"]} #{customer["lastName"]} (ID: #{customer["id"]})")
-            customers << customer
-          else
-            log_error("❌ Failed to create customer: Customer#{i + 1}")
-          end
-        end
+      ### **🔹 Employee Handling**
+      def ensure_employees(existing_employees)
+        return existing_employees unless existing_employees.empty?
 
-        customers
+        create_employees_and_roles
+      end
+
+      def fetch_existing_employees
+        log_info("🔍 Fetching existing employees from Clover API...")
+        safe_api_call { @services[:employee].get_employees(100) } || []
+      end
+
+      ### **🔹 Discount Handling**
+      def ensure_discounts(existing_discounts)
+        return existing_discounts unless existing_discounts.empty?
+
+        create_discounts
+      end
+
+      def fetch_existing_discounts
+        log_info("🔍 Fetching existing discounts from Clover API...")
+        safe_api_call { @services[:discount].get_discounts(100) } || []
+      end
+
+      def create_discounts
+        log_info("🔄 Creating discounts from JSON file...")
+        discounts_data = load_json("discounts.json")
+
+        discounts_data.map do |discount_data|
+          @services[:discount].create_discount({
+                                                 "name" => discount_data["name"],
+                                                 "rate" => discount_data["rate"],
+                                                 "isDefault" => discount_data["isDefault"]
+                                               })
+        end.compact
+      end
+
+      ### **🔹 Tax Handling**
+      def ensure_tax_rates(existing_tax_rates)
+        return existing_tax_rates if existing_tax_rates.size > 1
+
+        create_tax_rates
+      end
+
+      def fetch_existing_taxes
+        log_info("🔍 Fetching existing tax rates from Clover API...")
+        safe_api_call { @services[:tax].get_tax_rates(100) } || []
+      end
+
+      def create_tax_rates
+        log_info("🔄 Creating tax rates from JSON file...")
+        tax_rates_data = load_json("tax_rates.json")
+
+        tax_rates_data.map do |tax_rate_data|
+          @services[:tax].create_tax_rate({
+                                            "name" => tax_rate_data["name"],
+                                            "rate" => tax_rate_data["rate"],
+                                            "isDefault" => tax_rate_data["isDefault"]
+                                          })
+        end.compact
+      end
+
+      ### **🔹 Utility Methods**
+      def safe_api_call
+        yield
+      rescue StandardError
+        []
+      end
+
+      def load_json(filename)
+        JSON.parse(File.read(File.join(INVENTORY_DATA_PATH, filename)))
+      rescue StandardError
+        log_error("❌ Failed to load #{filename}.")
+        []
       end
     end
   end

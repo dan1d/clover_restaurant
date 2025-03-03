@@ -4,7 +4,7 @@ module CloverRestaurant
     class InventoryService < BaseService
       def get_categories(limit = 100, offset = 0)
         logger.info "Fetching categories for merchant #{@config.merchant_id}"
-        make_request(:get, endpoint("categories"), nil, { limit: limit, offset: offset })
+        make_request(:get, endpoint("categories"), nil, { limit: limit, offset: offset, expand: "items" })
       end
 
       def get_category(category_id)
@@ -54,7 +54,7 @@ module CloverRestaurant
 
       def get_items(limit = 100, offset = 0)
         logger.info "Fetching items for merchant #{@config.merchant_id}"
-        make_request(:get, endpoint("items"), nil, { limit: limit, offset: offset })
+        make_request(:get, endpoint("items"), nil, { limit: limit, offset: offset, expand: "categories" })
       end
 
       def get_item(item_id)
@@ -105,7 +105,7 @@ module CloverRestaurant
         payload["id"] = item_id
 
         logger.info "Update payload: #{payload.inspect}"
-        make_request(:post, endpoint("items/#{item_id}"), payload, { expand: "categories" })
+        make_request(:put, endpoint("items/#{item_id}"), payload, { expand: "categories" })
       end
 
       def delete_item(item_id)
@@ -137,99 +137,37 @@ module CloverRestaurant
         end
       end
 
-      # This method specifically handles bulk category assignments
-      # Add this to lib/clover_restaurant/services/inventory_service.rb
-
-      def bulk_assign_categories(item_category_mapping)
-        logger.info "Starting bulk category assignment for #{item_category_mapping.size} items"
-
-        bulk_items = item_category_mapping.map do |item_id, category_id|
-          item = get_item(item_id)
-          unless item
-            logger.error "❌ Item #{item_id} not found, skipping"
-            next
-          end
-
-          {
-            "id" => item_id,
-            "categories" => [{ "id" => category_id }],
-            "name" => item["name"],
-            "price" => item["price"],
-            "priceType" => item["priceType"] || "FIXED",
-            "hidden" => item["hidden"] || false,
-            "available" => item["available"] || true,
-            "defaultTaxRates" => item["defaultTaxRates"] || [],
-            "cost" => item["cost"] || 0,
-            "isRevenue" => item["isRevenue"] || true
-          }
-        end.compact
-
-        if bulk_items.empty?
-          logger.error "❌ No valid items found for bulk assignment"
-          return { success: false, error: "No valid items found" }
-        end
-
-        logger.info "Prepared bulk items payload: #{bulk_items.inspect}"
-
-        response = bulk_update_items(bulk_items)
-        if response && response["elements"]
-          logger.info "✅ Successfully assigned categories to #{response["elements"].size} items"
-          { success: true, updated_count: response["elements"].size }
-        else
-          logger.warn "⚠️ Bulk assignment failed, falling back to individual assignments"
-
-          # Fall back to individual assignments
-          success_count = 0
-          failure_count = 0
-
-          item_category_mapping.each do |item_id, category_id|
-            assign_item_to_category(item_id, category_id)
-            success_count += 1
-          rescue StandardError => e
-            logger.error "❌ Failed to assign item #{item_id} to category #{category_id}: #{e.message}"
-            failure_count += 1
-          end
-
-          {
-            success: success_count > 0,
-            updated_count: success_count,
-            failure_count: failure_count
-          }
-        end
-      end
-
       # Individual item-to-category assignment (fallback method)
-      def assign_item_to_category(item_id, category_id)
-        log_info("🔄 Assigning item #{item_id} to category #{category_id}...")
+      def assign_item_to_category(item_id, category)
+        log_info("🔄 Assigning item #{item_id} to category #{category}...")
 
         # Get the current item data
-        item = @services[:inventory].get_item(item_id)
+        item = get_item(item_id)
         unless item
           log_error("❌ Item #{item_id} not found, skipping")
           return nil
         end
 
         # Get the category data
-        category = @services[:inventory].get_category(category_id)
+        category = get_category(category["id"])
         unless category
-          log_error("❌ Category #{category_id} not found, skipping")
+          log_error("❌ Category #{category["id"]} not found, skipping")
           return nil
         end
 
         # Prepare the payload for assigning the category
         payload = {
-          "id" => item_id,
-          "categories" => [
+          "elements" => [
             {
-              "id" => category_id,
-              "name" => category["name"] # Include the category name
+              "category" => { "id" => category["id"] },
+              "item" => { "id" => item_id }
             }
           ]
         }
 
         # Update the item with the new category
-        updated_item = @services[:inventory].update_item(item_id, payload, { expand: "categories" })
-        if updated_item
+        updated_item = make_request(:post, endpoint("category_items"), payload, { expand: "categories" })
+        if updated_item && updated_item["id"]
           log_info("✅ Successfully assigned item #{item_id} to category #{category["name"]}")
           updated_item
         else

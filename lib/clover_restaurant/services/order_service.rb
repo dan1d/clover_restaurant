@@ -24,7 +24,8 @@ module CloverRestaurant
 
       def get_order(order_id)
         logger.info "=== Fetching order #{order_id} for merchant #{@config.merchant_id} ==="
-        make_request(:get, endpoint("orders/#{order_id}"))
+        make_request(:get, endpoint("orders/#{order_id}"), nil,
+                     { expand: "lineItems,serviceCharge,discounts,credits,payments,customers,orderFulfillmentEvent,refunds" })
       end
 
       def create_order(order_data = {})
