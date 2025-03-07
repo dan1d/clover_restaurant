@@ -2,12 +2,12 @@
 module CloverRestaurant
   module Services
     class CustomerService < BaseService
-      def get_customers(limit = 100, offset = 0, filter = nil)
+      def get_customers(limit = 99, offset = 0, filter = nil)
         logger.info "=== Fetching customers for merchant #{@config.merchant_id} ==="
         query_params = { limit: limit, offset: offset }
         query_params[:filter] = filter if filter
 
-        make_request(:get, endpoint("customers"), nil, query_params)
+        make_request(:get, endpoint("customers"), nil)
       end
 
       def get_customer(customer_id)

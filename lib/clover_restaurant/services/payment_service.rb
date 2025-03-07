@@ -84,6 +84,7 @@ module CloverRestaurant
           "taxAmount" => tax_amount,
           "createdTime" => past_timestamp, # Use past timestamp
           "clientCreatedTime" => past_timestamp, # Use past timestamp
+          "modifiedTime" => past_timestamp, # Use past timestamp
           "transactionSettings" => {
             "disableCashBack" => false,
             "cloverShouldHandleReceipts" => true,

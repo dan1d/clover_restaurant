@@ -108,6 +108,7 @@ module CloverRestaurant
         tax
         tender
         tip
+        device
       ]
     end
   end

@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# test_bulk_category_assignment.rb - Tests bulk item-to-category assignment
+# direct_assignment_test.rb - Tests direct item-to-category assignment
 
 # Add the local lib directory to the load path
 $LOAD_PATH.unshift(File.expand_path("lib", __dir__))
@@ -22,145 +22,167 @@ CloverRestaurant.configure do |config|
 end
 
 puts "\n#{"=" * 80}".colorize(:cyan)
-puts "#{"BULK CATEGORY ASSIGNMENT TEST".center(80)}".colorize(:cyan)
+puts "#{"DIRECT CATEGORY ASSIGNMENT TEST".center(80)}".colorize(:cyan)
 puts "#{"=" * 80}\n".colorize(:cyan)
 
-# Get inventory service
+# Get services
 inventory_service = CloverRestaurant::Services::InventoryService.new
 
-# Step 1: Create test categories
-puts "Creating test categories...".colorize(:light_blue)
-test_categories = [
-  { "name" => "Test Category 1 #{Time.now.to_i}" },
-  { "name" => "Test Category 2 #{Time.now.to_i}" }
-]
+# Define direct assignment method
+def direct_assign_item_to_category(inventory_service, item, category)
+  puts "Attempting to assign item #{item} to category #{category}..."
+  puts "Item: #{item.inspect}"
+  puts "Category: #{category.inspect}"
 
-created_categories = []
-test_categories.each do |category_data|
-  response = inventory_service.create_category(category_data)
-  if response && response["id"]
-    created_categories << response
-    puts "✅ Created category: #{response["name"]} (ID: #{response["id"]})"
+  # Create the payload for assignment
+  payload = {
+    "elements" => [
+      {
+        "category" => { "id" => category["id"] },
+        "item" => { "id" => item["id"] }
+      }
+    ]
+  }
+
+  # Make the API request
+  endpoint = "category_items?expand=items"
+  puts "Sending request to endpoint: #{endpoint}..."
+  puts "Payload: #{payload.inspect}"
+  response = inventory_service.send(:make_request, :post, inventory_service.send(:endpoint, endpoint), payload)
+  puts "Response: #{response.inspect}"
+  if response
+    puts "✅ Assignment successful!".colorize(:green)
+    true
   else
-    puts "❌ Failed to create category: #{category_data["name"]}"
+    puts "❌ Assignment failed!".colorize(:red)
+    puts "Response: #{response.inspect}"
+    false
   end
 end
 
-if created_categories.empty?
-  puts "❌ Could not create any test categories. Exiting.".colorize(:red)
+# Step 1: Fetch categories
+puts "Fetching all categories...".colorize(:light_blue)
+categories_response = inventory_service.get_categories
+categories = categories_response && categories_response["elements"] ? categories_response["elements"] : []
+
+if categories.empty?
+  puts "No categories found. Exiting.".colorize(:red)
   exit 1
 end
 
-# Step 2: Create test items
-puts "\nCreating test items...".colorize(:light_blue)
-test_items = [
-  { "name" => "Test Item 1 #{Time.now.to_i}", "price" => 1099 },
-  { "name" => "Test Item 2 #{Time.now.to_i}", "price" => 1599 },
-  { "name" => "Test Item 3 #{Time.now.to_i}", "price" => 899 },
-  { "name" => "Test Item 4 #{Time.now.to_i}", "price" => 1299 }
-]
-
-created_items = []
-test_items.each do |item_data|
-  response = inventory_service.create_item(item_data)
-  if response && response["id"]
-    created_items << response
-    puts "✅ Created item: #{response["name"]} (ID: #{response["id"]})"
-  else
-    puts "❌ Failed to create item: #{item_data["name"]}"
-  end
+# Print available categories
+puts "\nAvailable Categories:".colorize(:yellow)
+categories.each_with_index do |category, index|
+  puts "#{index + 1}. #{category["name"]} (ID: #{category["id"]})"
 end
 
-if created_items.empty?
-  puts "❌ Could not create any test items. Exiting.".colorize(:red)
+# Step 2: Fetch items
+puts "\nFetching all items...".colorize(:light_blue)
+items_response = inventory_service.get_items
+items = items_response && items_response["elements"] ? items_response["elements"] : []
+
+if items.empty?
+  puts "No items found. Exiting.".colorize(:red)
   exit 1
 end
 
-# Step 3: Create item-category mapping
-puts "\nCreating item-category mapping...".colorize(:light_blue)
-item_category_mapping = {}
+# Print available items
+puts "\nAvailable Items:".colorize(:yellow)
+items.each_with_index do |item, index|
+  puts "#{index + 1}. #{item["name"]} (ID: #{item["id"]})"
 
-# Assign the first two items to the first category
-item_category_mapping[created_items[0]["id"]] = created_categories[0]["id"]
-item_category_mapping[created_items[1]["id"]] = created_categories[0]["id"]
-
-# Assign the next two items to the second category (if available)
-if created_items.size >= 4 && created_categories.size >= 2
-  item_category_mapping[created_items[2]["id"]] = created_categories[1]["id"]
-  item_category_mapping[created_items[3]["id"]] = created_categories[1]["id"]
-end
-
-puts "Item-category mapping:"
-item_category_mapping.each do |item_id, category_id|
-  item_name = created_items.find { |i| i["id"] == item_id }["name"]
-  category_name = created_categories.find { |c| c["id"] == category_id }["name"]
-  puts "  - #{item_name} (#{item_id}) => #{category_name} (#{category_id})"
-end
-
-# Step 4: Perform bulk assignment
-puts "\nPerforming bulk assignment...".colorize(:light_blue)
-
-begin
-  result = inventory_service.bulk_assign_items_to_categories(item_category_mapping)
-
-  if result && result[:success]
-    puts "✅ Bulk assignment succeeded: #{result[:updated_count]} items updated".colorize(:green)
-  else
-    puts "❌ Bulk assignment failed".colorize(:red)
-    if result && result[:errors] && result[:errors].any?
-      puts "Errors:"
-      result[:errors].each do |error|
-        puts "  - #{error}"
+  # Print category info
+  if item["categories"]
+    if item["categories"].is_a?(Hash) && item["categories"]["elements"]
+      categories_count = item["categories"]["elements"].size
+      category_names = item["categories"]["elements"].map { |c| c["name"] }.join(", ")
+      if categories_count > 0
+        puts "   Has #{categories_count} categories: #{category_names}"
+      else
+        puts "   Has 0 categories (empty elements array)"
       end
+    elsif item["categories"].is_a?(Array)
+      categories_count = item["categories"].size
+      category_names = item["categories"].map { |c| c["name"] }.join(", ")
+      if categories_count > 0
+        puts "   Has #{categories_count} categories: #{category_names}"
+      else
+        puts "   Has 0 categories (empty array)"
+      end
+    else
+      puts "   Categories info: #{item["categories"].inspect}"
     end
+  else
+    puts "   No categories information"
   end
-rescue StandardError => e
-  puts "❌ Error during bulk assignment: #{e.message}".colorize(:red)
-  puts e.backtrace.join("\n") if ENV["DEBUG"]
 end
 
-# Step 5: Verify assignments
+# Step 3: Select some items and a category for testing
+puts "\nSelecting items and category for test assignment...".colorize(:light_blue)
+
+# Select a category (using the first one for this test)
+selected_category = categories.first
+puts "Selected category: #{selected_category["name"]} (ID: #{selected_category["id"]})".colorize(:green)
+
+# Select a few items (first 3 for this test)
+selected_items = items
+puts "Selected items:".colorize(:green)
+selected_items.each do |item|
+  puts "  - #{item["name"]} (ID: #{item["id"]})"
+end
+
+# Step 4: Perform direct assignments
+puts "\nPerforming direct assignments...".colorize(:light_blue)
+results = []
+
+selected_items.each do |item|
+  result = direct_assign_item_to_category(inventory_service, item, categories.sample)
+  results << {
+    item_name: item["name"],
+    item_id: item["id"],
+    success: result
+  }
+end
+
+# Step 5: Verify the assignments
 puts "\nVerifying assignments...".colorize(:light_blue)
+selected_items.each do |item|
+  puts "Checking categories for #{item["name"]} (ID: #{item["id"]})..."
 
-# Check each category for its items
-created_categories.each do |category|
-  puts "Checking items in category: #{category["name"]} (#{category["id"]})"
+  # Get updated item data
+  updated_item = inventory_service.get_item(item["id"])
 
-  begin
-    response = inventory_service.get_category_items(category["id"])
-    items = response && response["elements"] ? response["elements"] : []
+  # Check if the item now has the category
+  has_category = false
+  category_found = false
 
-    if items.any?
-      puts "Found #{items.size} items in category:"
-      items.each do |item|
-        puts "  - #{item["name"]} (#{item["id"]})"
+  if updated_item["categories"]
+    if updated_item["categories"].is_a?(Hash) && updated_item["categories"]["elements"]
+      categories_count = updated_item["categories"]["elements"].size
+      has_category = categories_count > 0
+
+      if has_category
+        category_found = updated_item["categories"]["elements"].any? do |c|
+          c["id"] == selected_category["id"]
+        end
       end
-    else
-      puts "No items found in category"
+    elsif updated_item["categories"].is_a?(Array)
+      categories_count = updated_item["categories"].size
+      has_category = categories_count > 0
+
+      if has_category
+        category_found = updated_item["categories"].any? do |c|
+          c["id"] == selected_category["id"]
+        end
+      end
     end
-  rescue StandardError => e
-    puts "Error checking category items: #{e.message}"
   end
-end
 
-# Check each item for its categories
-puts "\nChecking item categories..."
-created_items.each do |item|
-  puts "Checking categories for item: #{item["name"]} (#{item["id"]})"
-
-  begin
-    item_detail = inventory_service.get_item(item["id"])
-
-    if item_detail && item_detail["categories"] && item_detail["categories"].any?
-      puts "Item has #{item_detail["categories"].size} categories:"
-      item_detail["categories"].each do |category|
-        puts "  - #{category["name"]} (#{category["id"]})"
-      end
-    else
-      puts "No categories found for item"
-    end
-  rescue StandardError => e
-    puts "Error checking item categories: #{e.message}"
+  if category_found
+    puts "✅ Verification successful! Item now has the category.".colorize(:green)
+  else
+    puts "❌ Verification failed! Item does not have the category.".colorize(:red)
+    puts "Updated item data: #{updated_item.inspect}"
   end
 end
 
