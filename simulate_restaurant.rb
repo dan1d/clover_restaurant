@@ -98,9 +98,109 @@ class CloverAutomation
 
   def setup_entities
     logger.info "Setting up Clover entities..."
-    @entity_generator.create_entities
+
+    # Step 1: Create tax rates first (needed for items)
+    logger.info "Step 1: Creating tax rates..."
+    @services_manager.tax.create_standard_tax_rates
+
+    # Step 2: Create standard categories
+    logger.info "Step 2: Creating restaurant categories..."
+    @entity_generator.create_categories
+
+    # Step 3: Create modifier groups
+    logger.info "Step 3: Creating modifier groups..."
+    @services_manager.modifier.create_common_modifier_groups
+
+    # Step 4: Create menu items (with modifiers and tax rates)
+    logger.info "Step 4: Creating menu items..."
+    @entity_generator.create_items
+
+    # Step 5: Create employee roles and employees
+    logger.info "Step 5: Creating employee roles and staff..."
+    roles = @services_manager.employee.create_standard_restaurant_roles
+    @services_manager.employee.create_random_employees(15, roles)
+
+    # Step 6: Create customer base
+    logger.info "Step 6: Creating customer base..."
+    @services_manager.customer.create_random_customers(30)
+
+    # Step 7: Create standard tenders
+    logger.info "Step 7: Creating payment tenders..."
     @services_manager.tender.create_standard_tenders
-    logger.info "Clover setup complete"
+
+    # Step 8: Create standard discounts
+    logger.info "Step 8: Creating standard discounts..."
+    create_standard_discounts
+
+    logger.info "✅ Basic restaurant setup complete"
+  end
+
+  def create_standard_discounts
+    discounts = [
+      {
+        name: "Happy Hour",
+        percentage: true,
+        amount: 2000, # 20% off
+        maxAmount: nil,
+        minAmount: nil,
+        autoApply: false
+      },
+      {
+        name: "Senior Discount",
+        percentage: true,
+        amount: 1000, # 10% off
+        maxAmount: nil,
+        minAmount: nil,
+        autoApply: false
+      },
+      {
+        name: "Military Discount",
+        percentage: true,
+        amount: 1500, # 15% off
+        maxAmount: nil,
+        minAmount: nil,
+        autoApply: false
+      },
+      {
+        name: "$10 Off $50+",
+        percentage: false,
+        amount: 1000, # $10 off
+        maxAmount: nil,
+        minAmount: 5000, # Minimum $50 order
+        autoApply: false
+      },
+      {
+        name: "Lunch Special",
+        percentage: true,
+        amount: 1500, # 15% off
+        maxAmount: nil,
+        minAmount: nil,
+        autoApply: false
+      }
+    ]
+
+    created_discounts = []
+
+    discounts.each do |discount|
+      discount_data = {
+        "name" => discount[:name],
+        "percentage" => discount[:percentage],
+        "amount" => discount[:amount],
+        "maxAmount" => discount[:maxAmount],
+        "minAmount" => discount[:minAmount],
+        "autoApply" => discount[:autoApply]
+      }
+
+      created_discount = @services_manager.discount.create_discount(discount_data)
+      if created_discount && created_discount["id"]
+        logger.info "✅ Created discount: #{created_discount["name"]}"
+        created_discounts << created_discount
+      else
+        logger.error "❌ Failed to create discount: #{discount[:name]}"
+      end
+    end
+
+    created_discounts
   end
 
   #
@@ -108,27 +208,35 @@ class CloverAutomation
   #
 
   def generate_past_orders(days_range = DEFAULT_DAYS_RANGE, orders_per_day_range = DEFAULT_ORDERS_PER_DAY)
-    logger.info "Generating multiple orders per day for the past #{days_range} days..."
+    logger.info "Generating orders for the past #{days_range} days..."
 
-    # Load all required data upfront to minimize API calls
+    # Load all required data upfront
     resources = load_all_resources
     validate_resources(resources)
 
     successful_orders = []
 
     # Create orders for each day in the range
-    (15..days_range).each do |days_ago|
+    (1..days_range).each do |days_ago|
       past_date = Time.now - days_ago.days
       date_string = past_date.strftime("%Y-%m-%d")
 
-      # Random number of orders per day
-      num_orders = rand(orders_per_day_range)
-      logger.info "Creating #{num_orders} orders for #{date_string}..."
+      # Vary number of orders by day of week
+      base_orders = case past_date.wday
+                   when 5, 6 # Friday and Saturday
+                     rand(15..25) # Busy weekend
+                   when 0 # Sunday
+                     rand(10..15) # Busy brunch
+                   when 1..4 # Monday to Thursday
+                     rand(5..10) # Regular weekday
+                   end
+
+      logger.info "Creating #{base_orders} orders for #{date_string}..."
 
       # Create orders for this date in batch
       new_orders = process_batch_orders_for_date(
         past_date,
-        num_orders,
+        base_orders,
         resources
       )
 
@@ -223,6 +331,44 @@ class CloverAutomation
   def process_batch_orders_for_date(date, num_orders, resources)
     successful_orders = []
 
+    num_orders.times do |i|
+      # Generate timestamp within business hours
+      timestamp = generate_timestamp_for_order(date, i, num_orders)
+
+      # Generate line items
+      line_items = generate_line_items(resources[:category_map], resources[:items])
+
+      # Apply discount sometimes (20% chance)
+      discount = if rand < 0.2 && resources[:discounts] && !resources[:discounts].empty?
+                  resources[:discounts].sample
+                end
+
+      # Create the order with all details
+      order = create_optimized_order(
+        timestamp,
+        resources,
+        line_items,
+        discount
+      )
+
+      successful_orders << order if order
+    end
+
+    successful_orders
+  end
+
+  def generate_timestamp_for_order(date, order_index, total_orders)
+    # Restaurant hours: 11:00 AM to 10:00 PM
+    opening_hour = 11
+    closing_hour = 22
+
+    # Calculate hour based on order index
+    hour_span = closing_hour - opening_hour
+    hour = opening_hour + ((order_index.to_f / total_orders) * hour_span).round
+
+    # Add some randomness to minutes
+    minutes = rand(60)
+
     num_orders.times do |order_index|
       # Create time for this order - distribute throughout the day
       timestamp = generate_timestamp_for_order(date, order_index, num_orders)
@@ -294,26 +440,44 @@ class CloverAutomation
 
   def generate_line_items(category_map, all_items)
     line_items = []
-    categories_to_use = category_map.keys.sample(rand(1..3))
+    num_items = rand(1..5) # Random number of items per order
 
-    categories_to_use.each do |category_id|
-      # Get items from this category, or fall back to all items
-      category_items = category_map[category_id] || all_items
-      next if category_items.empty?
+    num_items.times do
+      # Randomly select a category
+      category = category_map.values.sample
+      next unless category && category["items"]
 
-      # Select 1-3 items from this category
-      items_to_add = category_items.sample(rand(1..3))
+      # Randomly select an item from the category
+      item = category["items"].sample
+      next unless item
 
-      items_to_add.each do |item|
-        quantity = rand(1..2)
-        item_price = item["price"] || 0
+      # Get modifiers for this item
+      modifiers = get_item_modifiers(item["id"])
+      selected_modifiers = []
 
-        line_items << {
-          item: item,
-          quantity: quantity,
-          price: item_price
-        }
+      if modifiers && !modifiers.empty?
+        modifiers.each do |group|
+          # Skip if no modifiers in group
+          next unless group["modifiers"] && !group["modifiers"].empty?
+
+          # Determine how many modifiers to select based on min/max requirements
+          min_required = group["minRequired"] || 0
+          max_allowed = group["maxAllowed"] || 1
+          num_to_select = rand(min_required..max_allowed)
+
+          # Randomly select modifiers
+          selected = group["modifiers"].sample(num_to_select)
+          selected_modifiers.concat(selected.map { |m| { id: m["id"], name: m["name"], price: m["price"] } })
+        end
       end
+
+      # Add the item with its modifiers
+      quantity = rand(1..3)
+      line_items << {
+        item: item,
+        quantity: quantity,
+        modifiers: selected_modifiers
+      }
     end
 
     line_items
@@ -334,59 +498,100 @@ class CloverAutomation
   end
 
   # Optimized order creation that minimizes API calls
-  def create_optimized_order(timestamp, resources, line_items, discount, total_price)
-    # Step 1: Create the basic order shell - must be done first to get an order ID
+  def create_optimized_order(timestamp, resources, line_items, discount = nil, total_price = nil)
+    # Step 1: Create the basic order
     order_data = {
-      "employee" => { "id" => resources[:employee]["id"] },
-      "customers" => [{ "id" => resources[:customer]["id"] }],
-      "diningOption" => resources[:dining_option],
+      "state" => "open",
       "createdTime" => timestamp,
-      "clientCreatedTime" => timestamp,
       "modifiedTime" => timestamp,
-      "clientModifiedTime" => timestamp,
-      "state" => "OPEN" # Pre-set to OPEN state
+      "orderType" => {
+        "id" => "DINE_IN" # Can be DINE_IN, TAKE_OUT, DELIVERY
+      }
     }
 
-    order_response = make_api_request("POST", "orders", order_data)
+    # Add employee if available
+    if resources[:employees] && !resources[:employees].empty?
+      order_data["employee"] = { "id" => resources[:employees].sample["id"] }
+    end
 
-    return nil unless order_response && order_response["id"]
+    # Add customer if available (80% chance)
+    if resources[:customers] && !resources[:customers].empty? && rand < 0.8
+      order_data["customer"] = { "id" => resources[:customers].sample["id"] }
+    end
 
-    order_id = order_response["id"]
+    # Create the order
+    order = @services_manager.order.create_order(order_data)
+    return false unless order && order["id"]
 
-    # Step 2: Add line items - unfortunately this must be separate calls
+    # Step 2: Add line items with modifiers
     line_items.each do |line_item|
+      item = line_item[:item]
+      quantity = line_item[:quantity]
+      modifiers = line_item[:modifiers]
+
       line_item_data = {
-        "item" => { "id" => line_item[:item]["id"] },
-        "quantity" => line_item[:quantity]
+        "item" => { "id" => item["id"] },
+        "name" => item["name"],
+        "price" => item["price"],
+        "printed" => false,
+        "quantity" => quantity
       }
 
-      line_item_response = make_api_request("POST", "orders/#{order_id}/line_items", line_item_data)
+      # Add modifiers if present
+      if modifiers && !modifiers.empty?
+        line_item_data["modifications"] = modifiers.map do |mod|
+          {
+            "modifier" => { "id" => mod[:id] },
+            "name" => mod[:name],
+            "price" => mod[:price]
+          }
+        end
+      end
 
-      if line_item_response
-        logger.info "Added #{line_item[:item]["name"] || line_item[:item]["id"]} - $#{line_item[:price] / 100.0} x #{line_item[:quantity]}"
+      # Create the line item
+      @services_manager.order.create_line_item(order["id"], line_item_data)
+    end
+
+    # Step 3: Calculate totals
+    subtotal = calculate_total_price(line_items)
+    tax_amount = calculate_tax_amount(line_items)
+    total = subtotal + tax_amount
+
+    # Step 4: Apply discount if present
+    if discount
+      discount_amount = calculate_discount_amount(discount, subtotal)
+      if discount_amount > 0
+        @services_manager.order.apply_discount(order["id"], discount["id"], discount_amount)
+        total -= discount_amount
       end
     end
 
-    # Step 3: Update order with correct timestamps, total, and state
-    update_data = {
-      "createdTime" => timestamp,
-      "clientCreatedTime" => timestamp,
-      "total" => total_price
-    }
+    # Step 5: Process payment
+    if total > 0
+      # Select a tender (prefer non-card tenders in sandbox)
+      tender = resources[:tenders].find { |t| !t["label"].downcase.include?("card") } || resources[:tenders].first
+      return false unless tender
 
-    make_api_request("POST", "orders/#{order_id}", update_data)
+      # Add tip (15-25% chance)
+      tip_percentage = rand(15..25)
+      tip_amount = ((total * tip_percentage) / 100.0).round
 
-    # Step 4: Process payment
-    payment_result = process_payment(
-      order_id,
-      resources[:employee]["id"],
-      resources[:tender]["id"],
-      total_price,
-      timestamp
-    )
+      # Process the payment with tip
+      payment_processed = process_payment(
+        order["id"],
+        order_data.dig("employee", "id"),
+        tender["id"],
+        total + tip_amount,
+        timestamp
+      )
 
-    # Return result or nil if payment failed
-    payment_result ? { order_id: order_id, total: total_price } : nil
+      return false unless payment_processed
+
+      # Update order state
+      @services_manager.order.update_order(order["id"], { "state" => "paid" })
+    end
+
+    order
   end
 
   def process_payment(order_id, employee_id, tender_id, amount, timestamp)
@@ -518,6 +723,42 @@ class CloverAutomation
     end
 
     puts table
+  end
+
+  def get_item_modifiers(item_id)
+    response = make_request(:get, "items/#{item_id}/modifier_groups")
+    return [] unless response && response["elements"]
+
+    response["elements"].map do |group|
+      # Get modifiers for this group
+      modifiers_response = make_request(:get, "modifier_groups/#{group["id"]}/modifiers")
+      group["modifiers"] = modifiers_response["elements"] if modifiers_response && modifiers_response["elements"]
+      group
+    end
+  end
+
+  def calculate_tax_amount(line_items)
+    total_tax = 0
+
+    line_items.each do |line_item|
+      item = line_item[:item]
+      quantity = line_item[:quantity]
+      base_price = item["price"] * quantity
+
+      # Add modifier prices
+      modifier_total = line_item[:modifiers].sum { |m| m[:price].to_i }
+      item_total = base_price + modifier_total
+
+      # Calculate tax based on tax rates
+      if item["taxRates"]
+        item["taxRates"].each do |tax_rate|
+          rate_percentage = tax_rate["rate"].to_f / 10000.0 # Convert basis points to percentage
+          total_tax += (item_total * rate_percentage).round
+        end
+      end
+    end
+
+    total_tax
   end
 end
 

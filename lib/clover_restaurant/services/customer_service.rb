@@ -225,122 +225,74 @@ module CloverRestaurant
         update_customer(customer_id, { "metadata" => metadata })
       end
 
-      def create_random_customers(num_customers = 10)
-        logger.info "=== Creating #{num_customers} random customers ==="
+      def create_random_customers(count = 20)
+        logger.info "Creating #{count} random customers"
 
-        # Check for existing customers first
-        existing_customers = get_customers(limit: 100)
-        if existing_customers && existing_customers["elements"] && existing_customers["elements"].size >= num_customers / 2
-          logger.info "Found #{existing_customers["elements"].size} existing customers, skipping creation"
-          return existing_customers["elements"].first(num_customers)
-        end
+        # Define realistic customer data
+        first_names = [
+          "James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda",
+          "William", "Elizabeth", "David", "Barbara", "Richard", "Susan", "Joseph", "Jessica",
+          "Thomas", "Sarah", "Charles", "Karen", "Christopher", "Nancy", "Daniel", "Lisa",
+          "Matthew", "Betty", "Anthony", "Margaret", "Mark", "Sandra", "Donald", "Ashley",
+          "Steven", "Kimberly", "Paul", "Emily", "Andrew", "Donna", "Joshua", "Michelle",
+          "Emma", "Olivia", "Ava", "Isabella", "Sophia", "Charlotte", "Mia", "Amelia",
+          "Harper", "Evelyn", "Abigail", "Emily", "Elizabeth", "Mila", "Ella", "Avery",
+          "Sofia", "Camila", "Aria", "Scarlett", "Victoria", "Madison", "Luna", "Grace"
+        ]
+
+        last_names = [
+          "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
+          "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson",
+          "Thomas", "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson",
+          "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson", "Walker",
+          "Young", "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
+          "Chen", "Lee", "Wang", "Yang", "Zhao", "Wu", "Zhou", "Xu", "Sun", "Ma", "Zhu",
+          "Li", "Zhang", "Liu", "Patel", "Singh", "Kumar", "Shah", "Sharma", "Murphy",
+          "O'Brien", "Ryan", "O'Connor", "Walsh", "O'Sullivan", "McCarthy", "O'Neill"
+        ]
+
+        email_domains = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com", "icloud.com"]
+        phone_area_codes = ["212", "646", "917", "347", "718", "516", "914", "631", "201", "732"]
 
         created_customers = []
-        success_count = 0
-        error_count = 0
 
-        num_customers.times do |i|
-          # Generate simpler, more predictable data instead of using Faker
-          first_name = "Customer#{i + 1}"
-          last_name = "Test"
+        count.times do
+          # Generate random customer data
+          first_name = first_names.sample
+          last_name = last_names.sample
+          email = "#{first_name.downcase}.#{last_name.downcase}#{rand(100..999)}@#{email_domains.sample}"
+          phone = "#{phone_area_codes.sample}#{rand(100..999)}#{rand(1000..9999)}"
 
-          # Generate phone with format XXX-XXX-XXXX
-          phone = "555-#{(100 + i).to_s.rjust(3, "0")}-#{(1000 + i).to_s.rjust(4, "0")}"
+          # Format phone number nicely
+          formatted_phone = "(#{phone[0..2]}) #{phone[3..5]}-#{phone[6..9]}"
 
-          # Generate valid email that will definitely pass validation
-          email = generate_valid_email(first_name, last_name)
+          # Create marketing preferences (60% chance to opt in)
+          marketing_allowed = rand < 0.6
 
+          # Create customer data
           customer_data = {
             "firstName" => first_name,
             "lastName" => last_name,
-            "phoneNumbers" => [
-              {
-                "phoneNumber" => phone,
-                "type" => "MOBILE"
-              }
-            ],
-            "emailAddresses" => [
-              {
-                "emailAddress" => email
-              }
-            ],
-            "marketingAllowed" => i.even? # Deterministic instead of random
+            "emailAddress" => email,
+            "phoneNumber" => formatted_phone,
+            "marketingAllowed" => marketing_allowed
           }
 
-          # Add address sometimes - use modulo for deterministic behavior
-          if i % 10 < 7 # 70% chance - deterministic
-            customer_data["addresses"] = [
-              {
-                "address1" => "#{100 + i} Main St",
-                "city" => "Springfield",
-                "state" => "IL",
-                "zip" => "62701",
-                "country" => "US"
-              }
-            ]
+          # Add optional address (30% chance)
+          if rand < 0.3
+            customer_data["address"] = generate_random_address
           end
 
-          # Add birthday sometimes - use modulo for deterministic behavior
-          if i % 10 < 3 # 30% chance - deterministic
-            # Generate a date between 18 and 70 years ago
-            year = Time.now.year - (18 + (i % 52)) # Deterministic age 18-70
-            month = (1 + (i % 12)).to_s.rjust(2, "0")
-            day = (1 + (i % 28)).to_s.rjust(2, "0")
-            customer_data["birthDate"] = "#{year}-#{month}-#{day}"
-          end
-
-          # Add notes sometimes - use modulo for deterministic behavior
-          if i % 10 < 4 # 40% chance - deterministic
-            note_options = [
-              "Prefers booth seating",
-              "Allergic to nuts",
-              "Likes extra spicy food",
-              "Regular happy hour customer",
-              "Celebrates birthday every year with us",
-              "Prefers window table",
-              "Wine enthusiast",
-              "Always orders dessert",
-              "Vegan diet",
-              "Gluten intolerant"
-            ]
-
-            note_index = i % note_options.size
-            customer_data["note"] = note_options[note_index]
-          end
-
-          logger.info "Creating customer #{i + 1}/#{num_customers}: #{first_name} #{last_name}"
-          logger.info "Customer data: #{customer_data.inspect}"
-
-          begin
-            # Check if customer already exists by phone or email before creating
-            existing_customer = get_customer_by_phone(phone)
-
-            existing_customer ||= get_customer_by_email(email)
-
-            if existing_customer
-              logger.info "Customer already exists with ID: #{existing_customer["id"]}, skipping creation"
-              created_customers << existing_customer
-              success_count += 1
-              next
-            end
-
+          # Create the customer
             customer = create_customer(customer_data)
-
             if customer && customer["id"]
-              logger.info "Successfully created customer: #{customer["firstName"]} #{customer["lastName"]} with ID: #{customer["id"]}"
+            logger.info "✅ Created customer: #{customer["firstName"]} #{customer["lastName"]}"
               created_customers << customer
-              success_count += 1
             else
-              logger.warn "Created customer but received unexpected response: #{customer.inspect}"
-              error_count += 1
-            end
-          rescue StandardError => e
-            logger.error "Failed to create customer: #{e.message}"
-            error_count += 1
+            logger.error "❌ Failed to create customer: #{customer_data["firstName"]} #{customer_data["lastName"]}"
           end
         end
 
-        logger.info "=== Finished creating customers: #{success_count} successful, #{error_count} failed ==="
         created_customers
       end
 
@@ -364,6 +316,45 @@ module CloverRestaurant
 
         # Use common domain for consistency
         "#{safe_first}.#{safe_last}#{random_num}@example.com"
+      end
+
+      def generate_random_address
+        # NYC-focused addresses
+        streets = [
+          "Broadway", "Park Avenue", "Madison Avenue", "5th Avenue", "Lexington Avenue",
+          "Amsterdam Avenue", "Columbus Avenue", "West End Avenue", "Riverside Drive",
+          "Central Park West", "York Avenue", "1st Avenue", "2nd Avenue", "3rd Avenue"
+        ]
+
+        street_types = ["Street", "Avenue", "Place", "Road", "Lane", "Boulevard"]
+        boroughs = ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]
+        zip_codes = {
+          "Manhattan" => ["10001", "10002", "10003", "10011", "10012", "10013", "10014", "10016", "10017", "10018", "10019", "10020", "10021", "10022", "10023", "10024", "10025", "10026", "10027", "10028"],
+          "Brooklyn" => ["11201", "11205", "11215", "11217", "11220", "11221", "11222", "11223", "11224", "11225", "11226", "11228", "11229", "11230", "11231", "11232", "11233", "11234", "11235", "11236"],
+          "Queens" => ["11101", "11102", "11103", "11104", "11105", "11106", "11354", "11355", "11356", "11357", "11358", "11359", "11360", "11361", "11362", "11363", "11364", "11365", "11366", "11367"],
+          "Bronx" => ["10451", "10452", "10453", "10454", "10455", "10456", "10457", "10458", "10459", "10460", "10461", "10462", "10463", "10464", "10465", "10466", "10467", "10468", "10469", "10470"],
+          "Staten Island" => ["10301", "10302", "10303", "10304", "10305", "10306", "10307", "10308", "10309", "10310", "10311", "10312", "10313", "10314"]
+        }
+
+        # Generate address components
+        street_number = rand(1..999)
+        street = streets.sample
+        apt_number = rand < 0.7 ? "Apt #{rand(1..20)}#{('A'..'F').to_a.sample}" : nil
+        borough = boroughs.sample
+        zip = zip_codes[borough].sample
+
+        # Build address
+        address = {
+          "address1" => "#{street_number} #{street}",
+          "city" => "New York",
+          "state" => "NY",
+          "zip" => zip
+        }
+
+        # Add apartment number if present
+        address["address2"] = apt_number if apt_number
+
+        address
       end
     end
   end

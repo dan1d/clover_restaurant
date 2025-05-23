@@ -985,105 +985,112 @@ module CloverRestaurant
       def create_sample_menu_items(categories = nil)
         logger.info "Creating sample menu items"
 
-        # Get categories if not provided
-        if categories.nil?
-          categories_response = get_categories
-          categories = categories_response["elements"] if categories_response && categories_response["elements"]
-        end
+        # Define realistic menu items by category
+        menu_items = {
+          "Appetizers" => [
+            { name: "Crispy Calamari", price: 1495, description: "Lightly breaded calamari served with marinara sauce and lemon wedges" },
+            { name: "Spinach & Artichoke Dip", price: 1295, description: "Creamy blend of spinach, artichokes, and melted cheeses, served with tortilla chips" },
+            { name: "Bruschetta", price: 995, description: "Grilled bread topped with fresh tomatoes, garlic, basil, and olive oil" },
+            { name: "Buffalo Wings", price: 1395, description: "Choice of mild, medium, or hot sauce, served with celery and blue cheese" },
+            { name: "Shrimp Cocktail", price: 1595, description: "Chilled jumbo shrimp served with cocktail sauce and lemon" }
+          ],
+          "Entrees" => [
+            { name: "Grilled Salmon", price: 2695, description: "Fresh Atlantic salmon with lemon butter sauce, served with seasonal vegetables" },
+            { name: "New York Strip Steak", price: 3295, description: "12oz USDA Choice strip steak, served with garlic mashed potatoes" },
+            { name: "Chicken Marsala", price: 2195, description: "Pan-seared chicken breast in Marsala wine sauce with mushrooms" },
+            { name: "Fettuccine Alfredo", price: 1895, description: "Homemade pasta in creamy Parmesan sauce" },
+            { name: "Herb-Crusted Rack of Lamb", price: 3495, description: "New Zealand lamb with rosemary-mint sauce" }
+          ],
+          "Sides" => [
+            { name: "Garlic Mashed Potatoes", price: 595, description: "Creamy potatoes with roasted garlic" },
+            { name: "Grilled Asparagus", price: 695, description: "Fresh asparagus with olive oil and sea salt" },
+            { name: "Mac & Cheese", price: 795, description: "Baked with three cheese blend and crispy breadcrumbs" },
+            { name: "Sweet Potato Fries", price: 595, description: "Served with chipotle aioli" },
+            { name: "Sautéed Mushrooms", price: 695, description: "Button mushrooms in garlic butter" }
+          ],
+          "Desserts" => [
+            { name: "New York Cheesecake", price: 895, description: "Classic cheesecake with berry compote" },
+            { name: "Chocolate Lava Cake", price: 995, description: "Warm chocolate cake with vanilla ice cream" },
+            { name: "Crème Brûlée", price: 895, description: "Classic vanilla bean custard with caramelized sugar" },
+            { name: "Apple Pie à la Mode", price: 795, description: "Warm apple pie with vanilla ice cream" },
+            { name: "Tiramisu", price: 895, description: "Italian coffee-flavored dessert with mascarpone" }
+          ],
+          "Drinks" => [
+            { name: "Fresh Lemonade", price: 395, description: "House-made with fresh squeezed lemons" },
+            { name: "Iced Tea", price: 295, description: "Fresh brewed, sweetened or unsweetened" },
+            { name: "Soft Drinks", price: 295, description: "Coke, Diet Coke, Sprite, or Ginger Ale" },
+            { name: "Sparkling Water", price: 395, description: "San Pellegrino (500ml)" },
+            { name: "Coffee", price: 295, description: "Regular or decaf" }
+          ],
+          "Alcoholic Beverages" => [
+            { name: "House Red Wine", price: 895, description: "Cabernet Sauvignon by the glass" },
+            { name: "House White Wine", price: 895, description: "Chardonnay by the glass" },
+            { name: "Draft Beer", price: 595, description: "Selection of local craft beers" },
+            { name: "Margarita", price: 995, description: "Traditional or flavored with premium tequila" },
+            { name: "Old Fashioned", price: 1195, description: "Classic cocktail with bourbon and bitters" }
+          ],
+          "Specials" => [
+            { name: "Catch of the Day", price: 2895, description: "Fresh fish selection with chef's preparation" },
+            { name: "Chef's Tasting Menu", price: 5995, description: "Five-course chef's selection" },
+            { name: "Sunday Prime Rib", price: 2995, description: "Slow-roasted prime rib with au jus" },
+            { name: "Seasonal Risotto", price: 2195, description: "Arborio rice with seasonal ingredients" },
+            { name: "Surf & Turf", price: 4495, description: "6oz filet mignon and lobster tail" }
+          ]
+        }
 
-        return false if categories.nil? || categories.empty?
-
-        # Create a category map for easier lookup
+        created_items = []
         category_map = {}
+
+        # Create a map of category names to IDs
         categories.each do |category|
           category_map[category["name"]] = category["id"]
         end
 
-        # Define sample items by category
-        sample_items = {
-          "Appetizers" => [
-            { "name" => "Caesar Salad", "price" => 995 },
-            { "name" => "Garlic Bread", "price" => 595 },
-            { "name" => "Mozzarella Sticks", "price" => 795 }
-          ],
-          "Entrees" => [
-            { "name" => "Classic Burger", "price" => 1295 },
-            { "name" => "Chicken Alfredo", "price" => 1495 },
-            { "name" => "Grilled Salmon", "price" => 1695 }
-          ],
-          "Sides" => [
-            { "name" => "French Fries", "price" => 495 },
-            { "name" => "Onion Rings", "price" => 595 },
-            { "name" => "Side Salad", "price" => 395 }
-          ],
-          "Desserts" => [
-            { "name" => "Chocolate Cake", "price" => 795 },
-            { "name" => "Cheesecake", "price" => 695 },
-            { "name" => "Ice Cream", "price" => 495 }
-          ],
-          "Drinks" => [
-            { "name" => "Soda", "price" => 295 },
-            { "name" => "Iced Tea", "price" => 250 },
-            { "name" => "Coffee", "price" => 345 }
-          ],
-          "Alcoholic Beverages" => [
-            { "name" => "Craft Beer", "price" => 695 },
-            { "name" => "House Wine", "price" => 895 },
-            { "name" => "Cocktail", "price" => 995 }
-          ],
-          "Specials" => [
-            { "name" => "Chef's Special", "price" => 1895 },
-            { "name" => "Catch of the Day", "price" => 1795 },
-            { "name" => "Seasonal Item", "price" => 1595 }
-          ]
-        }
-
-        # Keep track of all created items
-        all_created_items = []
-        item_category_mapping = {}
-
-        # First create all items
-        sample_items.each do |category_name, items|
+        # Create items for each category
+        menu_items.each do |category_name, items|
           category_id = category_map[category_name]
           next unless category_id
 
-          logger.info "Creating items for category: #{category_name} (ID: #{category_id})"
+          items.each do |item|
+            item_data = {
+              "name" => item[:name],
+              "price" => item[:price],
+              "description" => item[:description],
+              "cost" => (item[:price] * 0.3).to_i, # Cost is roughly 30% of price
+              "priceType" => "FIXED",
+              "isRevenue" => true,
+              "categories" => [{ "id" => category_id }]
+            }
 
-          items.each do |item_data|
-            # Create the item
-            item_response = create_item(item_data)
-
-            if item_response && item_response["id"]
-              logger.info "Created item: #{item_response["name"]} (ID: #{item_response["id"]})"
-              all_created_items << item_response
-
-              # Build mapping for bulk update
-              item_category_mapping[item_response["id"]] = category_id
+            # Add tax rates for alcoholic beverages
+            if category_name == "Alcoholic Beverages"
+              item_data["taxRates"] = [{ "id" => get_alcohol_tax_rate&.dig("id") }].compact
             else
-              logger.error "❌ Failed to create item: #{item_data["name"]}"
+              item_data["taxRates"] = [{ "id" => get_default_tax_rate&.dig("id") }].compact
             end
+
+            created_item = create_item(item_data)
+            created_items << created_item if created_item && created_item["id"]
           end
         end
 
-        # Then bulk assign all items to their categories
-        if item_category_mapping.any?
-          logger.info "Bulk assigning #{item_category_mapping.size} new items to their categories..."
-          result = bulk_assign_categories(item_category_mapping)
+        created_items
+      end
 
-          if result && result[:success]
-            logger.info "✅ Successfully assigned #{result[:updated_count]} items to categories"
-          else
-            logger.warn "⚠️ Bulk assignment had issues, falling back to individual assignments..."
+      private
 
-            # Fall back to individual assignments if needed
-            item_category_mapping.each do |item_id, category_id|
-              assign_item_to_category(item_id, category_id)
-            end
-          end
+      def get_default_tax_rate
+        @default_tax_rate ||= begin
+          tax_rates = @services_manager.tax.get_tax_rates
+          tax_rates&.dig("elements")&.find { |rate| rate["name"].downcase.include?("sales") }
         end
+      end
 
-        logger.info "Successfully created #{all_created_items.size} sample menu items"
-        all_created_items
+      def get_alcohol_tax_rate
+        @alcohol_tax_rate ||= begin
+          tax_rates = @services_manager.tax.get_tax_rates
+          tax_rates&.dig("elements")&.find { |rate| rate["name"].downcase.include?("alcohol") }
+        end
       end
     end
   end

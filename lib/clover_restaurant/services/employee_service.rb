@@ -374,117 +374,85 @@ module CloverRestaurant
         created_roles
       end
 
-      def create_random_employees(num_employees = 5, roles = nil)
-        logger.info "=== Creating #{num_employees} random employees ==="
+      def create_random_employees(count = 15, roles = nil)
+        logger.info "Creating #{count} random employees"
 
-        # Check for existing employees first
-        existing_employees = get_employees
-        if existing_employees && existing_employees["elements"] && existing_employees["elements"].size >= num_employees
-          logger.info "Found #{existing_employees["elements"].size} existing employees, skipping creation"
-          return existing_employees["elements"].first(num_employees)
-        end
+        # Get roles if not provided
+        roles ||= get_roles
+        return [] unless roles && !roles.empty?
 
-        # Get roles first if not provided
-        if roles.nil? || roles.empty?
-          logger.info "No roles provided, fetching available roles"
-          roles_response = get_roles
+        # Define realistic employee data
+        first_names = [
+          "James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda",
+          "William", "Elizabeth", "David", "Barbara", "Richard", "Susan", "Joseph", "Jessica",
+          "Thomas", "Sarah", "Charles", "Karen", "Christopher", "Nancy", "Daniel", "Lisa",
+          "Matthew", "Betty", "Anthony", "Margaret", "Mark", "Sandra", "Donald", "Ashley",
+          "Steven", "Kimberly", "Paul", "Emily", "Andrew", "Donna", "Joshua", "Michelle"
+        ]
 
-          roles = if roles_response && roles_response["elements"] && !roles_response["elements"].empty?
-                    roles_response["elements"]
-                  else
-                    # Create standard roles
-                    logger.info "No existing roles found, creating standard roles"
-                    create_standard_restaurant_roles
-                  end
-        end
+        last_names = [
+          "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
+          "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson",
+          "Thomas", "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson",
+          "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson", "Walker"
+        ]
 
-        if roles.nil? || roles.empty?
-          logger.error "No roles available to assign to employees"
-          return []
-        end
-
-        logger.info "Found #{roles.size} available roles"
+        # Define shifts
+        shifts = [
+          { name: "Morning", start: "06:00", end: "14:00" },
+          { name: "Afternoon", start: "14:00", end: "22:00" },
+          { name: "Evening", start: "16:00", end: "00:00" },
+          { name: "Night", start: "22:00", end: "06:00" }
+        ]
 
         created_employees = []
-        success_count = 0
-        error_count = 0
 
-        job_titles = {
-          "Manager" => ["General Manager", "Assistant Manager", "Shift Manager"],
-          "Server" => %w[Server Waiter Waitress],
-          "Bartender" => ["Bartender", "Bar Manager", "Mixologist"],
-          "Host" => ["Host", "Hostess", "Front of House"],
-          "Kitchen Staff" => ["Chef", "Line Cook", "Sous Chef", "Dishwasher", "Prep Cook"]
-        }
+        # Create employees with appropriate role distribution
+        count.times do |i|
+          # Select role based on position in restaurant
+          role = if i == 0
+                  # First employee is always a manager
+                  roles.find { |r| r["name"] == "Restaurant Manager" }
+                elsif i == 1
+                  # Second employee is a shift supervisor
+                  roles.find { |r| r["name"] == "Shift Supervisor" }
+                else
+                  # Other employees are distributed among remaining roles
+                  remaining_roles = roles.reject { |r| ["Restaurant Manager", "Shift Supervisor"].include?(r["name"]) }
+                  remaining_roles.sample
+                end
 
-        num_employees.times do |i|
-          # Generate deterministic 4-digit PIN instead of random
-          pin = (1000 + i).to_s
-
-          # Select role deterministically based on index
-          role_index = i % roles.size
-          role = roles[role_index]
-
-          # Generate name
-          first_name = "FirstName#{i + 1}" # Using predictable names
-          last_name = "LastName#{i + 1}"
-
-          # Determine job title based on role name
-          role_name = role["name"]
-          title_options = job_titles[role_name] || [role_name]
-          title_index = i % title_options.size
-          title = title_options[title_index]
+          # Generate employee data
+          first_name = first_names.sample
+          last_name = last_names.sample
+          pin = rand(1000..9999).to_s
+          shift = shifts.sample
 
           employee_data = {
             "name" => "#{first_name} #{last_name}",
             "nickname" => first_name,
-            "customId" => "EMP#{i + 100}",
             "pin" => pin,
             "role" => { "id" => role["id"] },
-            "inviteSent" => false,
+            "shifts" => [
+              {
+                "name" => shift[:name],
+                "startTime" => shift[:start],
+                "endTime" => shift[:end]
+              }
+            ],
             "isOwner" => false
           }
 
-          logger.info "Creating employee #{i + 1}/#{num_employees}: #{first_name} #{last_name} (Role: #{role_name})"
-
-          begin
-            # Check if employee already exists by PIN
-            existing_employee = get_employee_by_pin(pin)
-
-            if existing_employee
-              logger.info "Employee with PIN #{pin} already exists, skipping creation"
-              created_employees << existing_employee
-              success_count += 1
-              next
-            end
-
-            employee = create_employee(employee_data)
-
-            if employee && employee["id"]
-              logger.info "Successfully created employee with ID: #{employee["id"]}"
-
-              # Assign role to employee
-              begin
-                logger.info "Assigning role #{role["name"]} to employee"
-                assign_role_to_employee(employee["id"], role["id"])
-                logger.info "Successfully assigned role"
-              rescue StandardError => e
-                logger.error "Failed to assign role to employee: #{e.message}"
-              end
-
-              created_employees << employee
-              success_count += 1
-            else
-              logger.warn "Created employee but received unexpected response: #{employee.inspect}"
-              error_count += 1
-            end
-          rescue StandardError => e
-            logger.error "Failed to create employee: #{e.message}"
-            error_count += 1
+          # Create the employee
+          employee = create_employee(employee_data)
+          if employee && employee["id"]
+            logger.info "✅ Created #{role["name"]}: #{employee["name"]}"
+            created_employees << employee
+          else
+            logger.error "❌ Failed to create employee: #{employee_data["name"]}"
           end
         end
 
-        logger.info "=== Finished creating employees: #{success_count} successful, #{error_count} failed ==="
         created_employees
       end
     end

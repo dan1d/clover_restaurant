@@ -22,18 +22,6 @@ module CloverRestaurant
 
       def create_tax_rate(tax_rate_data)
         logger.info "=== Creating new tax rate for merchant #{@config.merchant_id} ==="
-
-        # Check if a tax rate with this name already exists
-        existing_rates = get_tax_rates
-        if existing_rates && existing_rates["elements"]
-          existing_rate = existing_rates["elements"].find { |r| r["name"] == tax_rate_data["name"] }
-          if existing_rate
-            logger.info "Tax rate '#{tax_rate_data["name"]}' already exists with ID: #{existing_rate["id"]}, skipping creation"
-            return existing_rate
-          end
-        end
-
-        logger.info "Tax rate data: #{tax_rate_data.inspect}"
         make_request(:post, endpoint("tax_rates"), tax_rate_data)
       end
 
@@ -175,91 +163,54 @@ module CloverRestaurant
       end
 
       def create_standard_tax_rates
-        logger.info "=== Creating standard tax rates for a restaurant ==="
+        logger.info "Creating standard tax rates"
 
-        # Check if standard tax rates already exist
-        existing_tax_rates = get_tax_rates
-        if existing_tax_rates && existing_tax_rates["elements"] && !existing_tax_rates["elements"].empty?
-          standard_names = ["Sales Tax", "Alcohol Tax", "Takeout Tax", "No Tax"]
-
-          existing_standard = existing_tax_rates["elements"].select { |tr| standard_names.include?(tr["name"]) }
-
-          if existing_standard.size >= 3
-            logger.info "Found #{existing_standard.size} standard tax rates already existing, skipping creation"
-            return existing_standard
-          end
-        end
-
-        standard_tax_rates = [
+        # Define standard tax rates
+        standard_rates = [
           {
-            "name" => "Sales Tax",
-            "rate" => 8.50,
-            "taxable" => true,
-            "isDefault" => true
+            name: "Sales Tax",
+            rate: 8.875, # NYC sales tax rate
+            is_default: true
           },
           {
-            "name" => "Alcohol Tax",
-            "rate" => 10.00,
-            "taxable" => true,
-            "isDefault" => false
+            name: "Alcohol Tax",
+            rate: 10.875, # Sales tax + alcohol tax
+            is_default: false
           },
           {
-            "name" => "Takeout Tax",
-            "rate" => 6.00,
-            "taxable" => true,
-            "isDefault" => false
+            name: "Takeout Tax",
+            rate: 8.875, # Same as sales tax but separate for reporting
+            is_default: false
           },
           {
-            "name" => "No Tax",
-            "rate" => 0.00,
-            "taxable" => false,
-            "isDefault" => false
+            name: "Delivery Tax",
+            rate: 8.875, # Same as sales tax but separate for reporting
+            is_default: false
           }
         ]
 
-        created_tax_rates = []
-        success_count = 0
-        error_count = 0
+        created_rates = []
 
-        logger.info "Creating #{standard_tax_rates.size} standard tax rates"
+        standard_rates.each do |rate_data|
+          # Convert percentage to basis points (multiply by 100)
+          basis_points = (rate_data[:rate] * 100).to_i
 
-        standard_tax_rates.each_with_index do |tax_rate_data, index|
-          logger.info "Creating tax rate #{index + 1}/#{standard_tax_rates.size}: #{tax_rate_data["name"]}"
+          tax_rate = {
+            "name" => rate_data[:name],
+            "rate" => basis_points,
+            "isDefault" => rate_data[:is_default]
+          }
 
-          begin
-            tax_rate = create_tax_rate(tax_rate_data)
-            if tax_rate && tax_rate["id"]
-              logger.info "Successfully created tax rate: #{tax_rate["name"]} with ID: #{tax_rate["id"]}"
-              created_tax_rates << tax_rate
-              success_count += 1
-            else
-              logger.warn "Created tax rate but received unexpected response: #{tax_rate.inspect}"
-              error_count += 1
-            end
-          rescue StandardError => e
-            logger.error "Failed to create tax rate #{tax_rate_data["name"]}: #{e.message}"
-            error_count += 1
+          created_rate = create_tax_rate(tax_rate)
+          if created_rate && created_rate["id"]
+            logger.info "✅ Created tax rate: #{created_rate["name"]} (#{created_rate["rate"] / 100.0}%)"
+            created_rates << created_rate
+          else
+            logger.error "❌ Failed to create tax rate: #{tax_rate["name"]}"
           end
         end
 
-        logger.info "Created #{success_count} tax rates successfully, #{error_count} failed"
-
-        # Set default tax rate (try but don't fail if it doesn't work)
-        if default_tax_rate = created_tax_rates.find { |tr| tr["isDefault"] }
-          logger.info "Setting default tax rate: #{default_tax_rate["name"]} (ID: #{default_tax_rate["id"]})"
-
-          begin
-            set_default_tax_rates([default_tax_rate["id"]])
-            logger.info "Successfully set default tax rate"
-          rescue StandardError => e
-            logger.error "Failed to set default tax rate: #{e.message}"
-            logger.info "Continuing without setting default tax rate"
-          end
-        else
-          logger.warn "No default tax rate found among created tax rates"
-        end
-
-        created_tax_rates
+        created_rates
       end
 
       def assign_category_tax_rates(categories, tax_rates)
