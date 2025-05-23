@@ -125,6 +125,17 @@ module CloverRestaurant
         make_request(:post, endpoint("preferences"), payload)
       end
 
+      def get_order_types
+        logger.info "=== Fetching order types for merchant #{@config.merchant_id} ==="
+        make_request(:get, endpoint("order_types"))
+      end
+
+      def create_order_type(order_type_data)
+        logger.info "=== Creating new order type for merchant #{@config.merchant_id} === "
+        logger.info "Order type data: #{order_type_data.inspect}"
+        make_request(:post, endpoint("order_types"), order_type_data)
+      end
+
       # Helper method to clear cached data if needed
       def clear_cache
         logger.info "=== Clearing merchant service cache ==="

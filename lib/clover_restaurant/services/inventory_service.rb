@@ -288,6 +288,41 @@ module CloverRestaurant
       end
       # END OF NEW METHOD
 
+      def get_modifier_groups_for_item(item_id)
+        logger.info "Fetching item ID '#{item_id}' with expanded modifier groups."
+        # MODIFIED: Fetch item with modifierGroups expansion
+        item_response = make_request(:get, endpoint("items/#{item_id}?expand=modifierGroups"))
+
+        unless item_response && item_response["modifierGroups"] && item_response["modifierGroups"]["elements"]
+          logger.warn "No modifier groups found for item ID '#{item_id}' or error in response. Item response: #{item_response.inspect}"
+          return []
+        end
+
+        associated_modifier_groups = item_response["modifierGroups"]["elements"]
+        logger.info "Found #{associated_modifier_groups.size} modifier group(s) associated with item ID '#{item_id}'."
+
+        detailed_modifier_groups = associated_modifier_groups.map do |group_ref|
+          group_id = group_ref["id"]
+          group_name = group_ref["name"] # Assuming name is part of the expanded group_ref
+
+          logger.info "Fetching modifiers for group ID '#{group_id}' (Name: '#{group_name}', associated with item '#{item_id}')"
+          modifiers_response = make_request(:get, endpoint("modifier_groups/#{group_id}/modifiers"))
+
+          group_data_for_item = group_ref.dup # Start with the data from the expanded item's modifierGroups
+
+          if modifiers_response && modifiers_response["elements"]
+            group_data_for_item["modifiers"] = modifiers_response["elements"]
+            logger.info "  Found #{modifiers_response["elements"].size} modifiers for group '#{group_name || group_id}'."
+          else
+            logger.warn "  No modifiers found for group ID '#{group_id}' or error in modifiers_response. Response: #{modifiers_response.inspect}"
+            group_data_for_item["modifiers"] = []
+          end
+          group_data_for_item
+        end
+
+        detailed_modifier_groups
+      end
+
       private
 
       def create_item(item_data)

@@ -31,7 +31,8 @@ class RestaurantSimulator
     'roles',
     'employees',
     'shifts',
-    'customers'
+    'customers',
+    'order_types'
   ]
 
   attr_reader :services_manager, :entity_generator, :logger
@@ -158,6 +159,8 @@ class RestaurantSimulator
           setup_shifts
         when 'customers'
           setup_customers
+        when 'order_types'
+          setup_order_types
         end
 
         @state.mark_step_completed(step)
@@ -312,6 +315,40 @@ class RestaurantSimulator
     end
   end
 
+  def setup_order_types
+    return if @state.step_completed?('order_types')
+
+    existing_order_types_response = @services_manager.merchant.get_order_types
+    if existing_order_types_response && existing_order_types_response["elements"]&.any?
+      @logger.info "Found #{existing_order_types_response["elements"].size} existing order types."
+      existing_order_types_response["elements"].each do |ot|
+        @state.record_entity('order_type', ot["id"], ot["label"] || ot["name"], ot)
+      end
+      return # Assuming existing ones are sufficient
+    end
+
+    @logger.info "No existing order types found or error fetching. Creating default order types."
+    default_order_types = [
+      { name: "Dine In", label: "Dine In", taxable: true, isDefault: true },
+      { name: "Take Out", label: "Take Out", taxable: true, isDefault: false },
+      { name: "Delivery", label: "Delivery", taxable: true, isDefault: false }
+    ]
+
+    default_order_types.each do |ot_data|
+      begin
+        created_ot = @services_manager.merchant.create_order_type(ot_data)
+        if created_ot && created_ot["id"]
+          @logger.info "✅ Successfully created order type: #{created_ot["label"]}"
+          @state.record_entity('order_type', created_ot["id"], created_ot["label"], created_ot)
+        else
+          @logger.error "❌ Failed to create order type: #{ot_data[:label]}. Response: #{created_ot.inspect}"
+        end
+      rescue StandardError => e
+        @logger.error "❌ Error creating order type #{ot_data[:label]}: #{e.message}"
+      end
+    end
+  end
+
   def print_summary
     summary = @state.get_creation_summary
 
@@ -334,6 +371,12 @@ class RestaurantSimulator
   def generate_past_orders(days_range = DEFAULT_DAYS_RANGE, orders_per_day_range = DEFAULT_ORDERS_PER_DAY)
     logger.info "Generating orders for the past #{days_range} days..."
 
+    # --- DEBUG: Force 1 day, 1 order ---
+    days_to_generate = 1 # Override for debugging
+    orders_per_day_override = 1 # Override for debugging
+    logger.info "[DEBUG] Overriding to generate 1 order for 1 day."
+    # --- END DEBUG ---
+
     # Load all required data upfront
     resources = load_all_resources
     validate_resources(resources)
@@ -341,30 +384,31 @@ class RestaurantSimulator
     successful_orders = []
 
     # Create orders for each day in the range
-    (1..days_range).each do |days_ago|
+    (1..days_to_generate).each do |days_ago| # MODIFIED to use days_to_generate
       past_date = Time.now - days_ago.days
       date_string = past_date.strftime("%Y-%m-%d")
 
-      # Vary number of orders by day of week
-      base_orders = case past_date.wday
-                   when 5, 6 # Friday and Saturday
-                     rand(15..25) # Busy weekend
-                   when 0 # Sunday
-                     rand(10..15) # Busy brunch
-                   when 1..4 # Monday to Thursday
-                     rand(5..10) # Regular weekday
-                   end
+      # Vary number of orders by day of week - overridden for debug
+      # base_orders = case past_date.wday
+      #              when 5, 6 # Friday and Saturday
+      #                rand(15..25) # Busy weekend
+      #              when 0 # Sunday
+      #                rand(10..15) # Busy brunch
+      #              when 1..4 # Monday to Thursday
+      #                rand(5..10) # Regular weekday
+      #              end
+      base_orders = orders_per_day_override # MODIFIED for debug
 
       logger.info "Creating #{base_orders} orders for #{date_string}..."
 
       # Create orders for this date in batch
-      new_orders = process_batch_orders_for_date(
+      new_orders_for_date = process_batch_orders_for_date( # Renamed to avoid confusion
         past_date,
         base_orders,
         resources
       )
 
-      successful_orders.concat(new_orders)
+      successful_orders.concat(new_orders_for_date) if new_orders_for_date # Ensure it's an array
     end
 
     # Print summary table
@@ -453,7 +497,7 @@ class RestaurantSimulator
   end
 
   def process_batch_orders_for_date(date, num_orders, resources)
-    successful_orders = []
+    orders_for_this_batch = [] # Changed variable name
 
     num_orders.times do |i|
       # Generate timestamp within business hours
@@ -475,10 +519,38 @@ class RestaurantSimulator
         discount
       )
 
-      successful_orders << order if order
+      #MODIFICATION START: Add order to list if it was created, regardless of payment
+      if order && order["id"]
+        order_details_for_summary = {
+          id: order["id"],
+          date: date.strftime("%Y-%m-%d"),
+          time: Time.at(timestamp / 1000).strftime("%H:%M:%S"), # Added seconds for more detail
+          total: order["total"] || 0, # Use order total which should be updated by create_optimized_order
+          # Attempt to get employee display name, fallback to name, then ID
+          employee: (resources[:employees].find { |emp| emp["id"] == order.dig("employee", "id") }&.[]("displayName") ||
+                     resources[:employees].find { |emp| emp["id"] == order.dig("employee", "id") }&.[]("name") ||
+                     order.dig("employee", "id") || "N/A"),
+          # Attempt to get tender label, fallback to ID
+          tender: ("N/A"), # Placeholder, will be updated if payment is successful
+          payment_status: "Pending" # Initial status
+        }
+
+        # If payment was attempted and successful inside create_optimized_order,
+        # it might return payment details or update the order object.
+        # For now, we assume create_optimized_order returns the order object.
+        # We will update payment_status and tender if payment succeeds.
+        # This part might need refinement based on what create_optimized_order returns regarding payment.
+
+        orders_for_this_batch << order_details_for_summary
+      elsif order == false # Explicitly check for false if create_optimized_order returns that on failure
+        logger.warn "Order creation failed for one attempt on #{date.strftime('%Y-%m-%d')}."
+      else
+        logger.warn "Order creation attempt returned unexpected value: #{order.inspect} on #{date.strftime('%Y-%m-%d')}."
+      end
+      #MODIFICATION END
     end
 
-    successful_orders
+    orders_for_this_batch # Return the collected orders for this batch
   end
 
   def generate_timestamp_for_order(date, order_index, total_orders)
@@ -564,7 +636,7 @@ class RestaurantSimulator
 
   def generate_line_items(category_map, all_items)
     line_items = []
-    num_items = rand(1..5) # Random number of items per order
+    num_items = rand(1..3) # Random number of items per order
 
     num_items.times do
       # Randomly select a list of items from a category
@@ -576,7 +648,14 @@ class RestaurantSimulator
       next unless item # Ensure item is not nil
 
       # Get modifiers for this item
-      modifiers = get_item_modifiers(item["id"])
+      # Use item["clover_id"] as items from StateManager store the Clover ID there.
+      item_actual_id = item["clover_id"] || item["id"] # Fallback to item["id"] just in case
+      unless item_actual_id && !item_actual_id.empty?
+        logger.warn "Skipping modifier fetch for item because its ID is missing or empty: #{item.inspect}"
+        modifiers = []
+      else
+        modifiers = get_item_modifiers(item_actual_id)
+      end
       selected_modifiers = []
 
       if modifiers && !modifiers.empty?
@@ -624,12 +703,18 @@ class RestaurantSimulator
   # Optimized order creation that minimizes API calls
   def create_optimized_order(timestamp, resources, line_items, discount = nil, total_price = nil)
     # Step 1: Create the basic order
+    order_type_to_use = @state.get_entities('order_type').sample
+    unless order_type_to_use && order_type_to_use["clover_id"]
+      @logger.error "No order types available in state. Cannot create order."
+      return false # Or raise an error
+    end
+
     order_data = {
       "state" => "open",
       "createdTime" => timestamp,
       "modifiedTime" => timestamp,
       "orderType" => {
-        "id" => "DINE_IN" # Can be DINE_IN, TAKE_OUT, DELIVERY
+        "id" => order_type_to_use["clover_id"]
       }
     }
 
@@ -638,87 +723,205 @@ class RestaurantSimulator
       order_data["employee"] = { "id" => resources[:employees].sample["id"] }
     end
 
-    # Add customer if available (80% chance)
-    if resources[:customers] && !resources[:customers].empty? && rand < 0.8
+    # Add customer if available
+    if resources[:customers] && !resources[:customers].empty?
       order_data["customer"] = { "id" => resources[:customers].sample["id"] }
     end
 
-    # Create the order
-    order = @services_manager.order.create_order(order_data)
-    return false unless order && order["id"]
+    # Prepare line_items for OrderService
+    prepared_line_items = line_items.map do |li|
+      item_obj = li[:item]
+      actual_item_id = item_obj["clover_id"] || item_obj["id"]
 
-    # Step 2: Add line items with modifiers
-    line_items.each do |line_item|
-      item = line_item[:item]
-      quantity = line_item[:quantity]
-      modifiers = line_item[:modifiers]
-
-      line_item_data = {
-        "item" => { "id" => item["id"] },
-        "name" => item["name"],
-        "price" => item["price"],
-        "printed" => false,
-        "quantity" => quantity
-      }
-
-      # Add modifiers if present
-      if modifiers && !modifiers.empty?
-        line_item_data["modifications"] = modifiers.map do |mod|
+      {
+        :item_id => actual_item_id,
+        :quantity => li[:quantity],
+        :modifications => (li[:modifiers] || []).map do |mod|
           {
             "modifier" => { "id" => mod[:id] },
             "name" => mod[:name],
-            "price" => mod[:price]
+            "amount" => mod[:price]
           }
         end
-      end
-
-      # Create the line item
-      @services_manager.order.create_line_item(order["id"], line_item_data)
+        # :notes => nil # if you have notes
+      }
     end
+    order_data["line_items"] = prepared_line_items
 
-    # Step 3: Calculate totals
-    subtotal = calculate_total_price(line_items)
-    tax_amount = calculate_tax_amount(line_items)
-    total = subtotal + tax_amount
+    # Create the order (OrderService#create_order will now handle adding these line items)
+    order = @services_manager.order.create_order(order_data)
+    return false unless order && order["id"]
+
+    # Step 2: Add line items with modifiers -- THIS SECTION IS NOW HANDLED BY OrderService#create_order
+    # line_items.each do |line_item|
+    #   item = line_item[:item]
+    #   quantity = line_item[:quantity]
+    #   modifiers = line_item[:modifiers]
+
+    #   line_item_data = {
+    #     "item" => { "id" => item["id"] },
+    #     "name" => item["name"],
+    #     "price" => item["price"],
+    #     "printed" => false,
+    #     "quantity" => quantity
+    #   }
+
+    #   # Add modifiers if present
+    #   if modifiers && !modifiers.empty?
+    #     line_item_data["modifications"] = modifiers.map do |mod|
+    #       {
+    #         "modifier" => { "id" => mod[:id] },
+    #         "name" => mod[:name],
+    #         "price" => mod[:price]
+    #       }
+    #     end
+    #   end
+
+    #   # Create the line item
+    #   @services_manager.order.create_line_item(order["id"], line_item_data)
+    # end
+
+    # Step 3: Calculate totals (This is now done within OrderService#create_order or needs re-evaluation)
+    # For now, assume OrderService#create_order returns an order object with total, or we fetch it.
+    # Let's simplify and assume `order` returned from `create_order` might have totals, or we fetch them.
+    # The `total` variable used for payment should be based on the final order state.
+
+    # Fetch the fresh order details, especially if totals are calculated server-side after line items.
+    current_order_details = @services_manager.order.get_order(order["id"])
+    return false unless current_order_details
+
+    total_from_order = current_order_details["total"] || 0 # Get total from the order object
 
     # Step 4: Apply discount if present
     if discount
-      discount_amount = calculate_discount_amount(discount, subtotal)
+      discount_amount = calculate_discount_amount(discount, total_from_order) # Calculate discount on the actual subtotal/total
       if discount_amount > 0
-        @services_manager.order.apply_discount(order["id"], discount["id"], discount_amount)
-        total -= discount_amount
+        @logger.info "Attempting to apply discount ID '#{discount["id"]}' of #{discount_amount} to order '#{order["id"]}'"
+        applied_discount_line = @services_manager.order.apply_discount(order["id"], discount["id"], discount_amount)
+        if applied_discount_line && applied_discount_line["id"]
+          # If discount application affects total, Clover API often returns the updated order or discount line.
+          # We might need to re-fetch order or adjust total_after_discount based on response.
+          # For now, assume Clover recalculates or the payment step will use the order total from Clover.
+          @logger.info "Successfully applied discount. Recalculating total or relying on order's current total for payment."
+          # Re-fetch order to get the most up-to-date total after discount application
+          updated_order_details = @services_manager.order.get_order(order["id"])
+          total_after_discount = updated_order_details["total"] || total_from_order - discount_amount if updated_order_details
+        else
+          @logger.warn "Failed to apply discount or no confirmation of discount effect on total. Using pre-discount total for payment or manual adjustment."
+          total_after_discount = total_from_order # Fallback or keep as is if apply_discount failed
+        end
+      else
+        total_after_discount = total_from_order
       end
+    else
+      total_after_discount = total_from_order
     end
+
+    # DEBUG LOGGING START
+    logger.info "DEBUG: Before payment block for Order ID #{current_order_details['id']}:"
+    logger.info "  total_from_order: #{total_from_order}"
+    logger.info "  discount_amount (if discount applied): #{discount_amount || 'N/A'}"
+    logger.info "  total_after_discount: #{total_after_discount}"
+    # DEBUG LOGGING END
 
     # Step 5: Process payment
-    if total > 0
+    if total_after_discount > 0 # Use total_after_discount for payment
       # Select a tender (prefer non-card tenders in sandbox)
+      # Ensure tenders are available
       tender = resources[:tenders].find { |t| !t["label"].downcase.include?("card") } || resources[:tenders].first
-      return false unless tender
+      unless tender
+        @logger.error "No suitable tender found for payment. Order: #{current_order_details['id']}"
+        # Update order with a note about payment failure due to no tender
+        @services_manager.order.update_order(current_order_details["id"], { "note" => "Payment failed: No suitable tender." })
+        return order # Return order even if payment fails, summary will show pending
+      end
 
-      # Add tip (15-25% chance)
-      tip_percentage = rand(15..25)
-      tip_amount = ((total * tip_percentage) / 100.0).round
+      # Define employee_id_for_payment (ensure this is defined before use)
+      employee_id_for_payment = current_order_details.dig("employee", "id") || resources[:employees]&.sample&.[]("id")
+      unless employee_id_for_payment
+         @logger.warn "No employee ID found for payment on order #{current_order_details['id']}. Payment might fail or use a default."
+         # Fallback if truly no employee can be found (should be rare if setup is complete)
+         employee_id_for_payment = @state.get_entities('employee')&.sample&.[]("id")
+      end
 
-      # Process the payment with tip
-      payment_processed = process_payment(
-        order["id"],
-        order_data.dig("employee", "id"),
-        tender["id"],
-        total + tip_amount,
-        timestamp
+      tip_percentage = rand(15..25) # Tip between 15% and 25%
+      tip_amount_for_payment_service = ((total_after_discount * tip_percentage) / 100.0).round
+      tip_amount_for_payment_service = [0, tip_amount_for_payment_service].max # Ensure tip is not negative
+
+      # tax_amount_for_payment_service is now correctly calculated by the updated calculate_tax_amount
+      tax_amount_for_payment_service = calculate_tax_amount(current_order_details["lineItems"]&.[]("elements"))
+
+      total_for_payment_service = total_after_discount + tip_amount_for_payment_service # This is subtotal + tip for PaymentService
+
+      # DEBUG LOGGING START (Ensure this is before the call)
+      logger.info "DEBUG: Values for PaymentService call on Order ID #{current_order_details['id']}:"
+      logger.info "  total_after_discount (subtotal used for tip/tax calcs): #{total_after_discount}"
+      logger.info "  tip_percentage: #{tip_percentage}%"
+      logger.info "  calculated tip_amount_for_payment_service (to PaymentService): #{tip_amount_for_payment_service}"
+      logger.info "  calculated tax_amount_for_payment_service (to PaymentService): #{tax_amount_for_payment_service}"
+      logger.info "  total_for_payment_service (subtotal+tip to PaymentService 'amount' field): #{total_for_payment_service}"
+      logger.info "  employee_id_for_payment (to PaymentService): #{employee_id_for_payment}"
+      logger.info "  selected_tender_id (used inside PaymentService): #{tender ? tender['id'] : 'N/A'}" # Tender is used within PaymentService now
+      # DEBUG LOGGING END
+
+      payment_response = @services_manager.payment.process_payment(
+        current_order_details["id"],          # order_id
+        total_for_payment_service,            # total_amount (subtotal + tip)
+        employee_id_for_payment,              # employee_id
+        timestamp,                            # past_timestamp
+        tip_amount_for_payment_service,       # tip_amount
+        tax_amount_for_payment_service        # tax_amount
       )
 
-      return false unless payment_processed
+      unless payment_response && payment_response["id"]
+        @logger.error "Payment processing failed for order '#{current_order_details['id']}'. Response: #{payment_response.inspect}"
+        # Update order with a note about payment failure
+        @services_manager.order.update_order(current_order_details["id"], { "note" => "Payment failed: #{payment_response.inspect}" })
+        #MODIFICATION: Return the order object even if payment fails, so it can be logged in summary
+        return order # Return order, summary will show payment as pending/failed
+      end
+      payment_id = payment_response["id"]
+      paid_amount = payment_response["amount"] # This is the subtotal part of the payment
 
-      # Update order state
-      @services_manager.order.update_order(order["id"], { "state" => "paid" })
+      # Update order state to paid
+      @services_manager.order.update_order(current_order_details["id"], { "state" => "paid", "paymentState" => "PAID" })
+      #MODIFICATION: Add payment details to the order object for summary
+      order["payment_status"] = "Paid"
+      order["tender_label"] = tender["label"] # Use the fetched tender's label
+      order["payment_id"] = payment_id
+      order["tip_amount"] = tip_amount_for_payment_service # Log tip
+      order["tax_amount"] = tax_amount_for_payment_service # Log tax
+
+      # Simulate a partial refund (e.g., 5% chance)
+      if rand < 0.05 && paid_amount > 0 # Ensure there's something to refund
+        refund_amount = (paid_amount * rand(0.1..0.5)).round # Refund 10-50% of the payment subtotal
+        if refund_amount > 0
+          @logger.info "Attempting to issue a partial refund of $#{refund_amount / 100.0} for payment '#{payment_id}' on order '#{current_order_details['id']}'."
+          @services_manager.payment.create_refund(payment_id, current_order_details["id"], refund_amount)
+        end
+      end
+
+    else # total_after_discount <= 0
+      @logger.warn "Total amount for order '#{current_order_details['id']}' is not positive (#{total_after_discount}), skipping payment."
+      # Update order with a note about no payment processed
+      @services_manager.order.update_order(current_order_details["id"], { "note" => "No payment processed: Total was not positive." })
+      #MODIFICATION: Add payment status to the order object for summary
+      order["payment_status"] = "NoPayment (ZeroTotal)"
+      order["tip_amount"] = 0 # No tip if no payment
+      order["tax_amount"] = 0 # No tax if no payment
+
     end
 
-    order
+    #MODIFICATION: If order was returned (even if payment failed), update its attributes from current_order_details
+    if order && current_order_details
+      order["total"] = current_order_details["total"] || 0 # Ensure total is from the definitive source
+      order["original_total_from_order_service"] = total_from_order # Keep track of this for debugging
+    end
+
+    order # Return the original order object, potentially modified with payment status
   end
 
-  def process_payment(order_id, employee_id, tender_id, amount, timestamp)
+  def process_payment(order_id, employee_id, tender_id, amount, timestamp) # This local method is unused.
     return false if amount <= 0
 
     logger.info "Processing payment: $#{amount / 100.0}..."
@@ -819,65 +1022,135 @@ class RestaurantSimulator
 
     # Calculate totals by date
     totals_by_date = {}
-    orders.each do |order|
-      totals_by_date[order[:date]] ||= { count: 0, total: 0 }
-      totals_by_date[order[:date]][:count] += 1
-      totals_by_date[order[:date]][:total] += order[:total]
+    orders.each do |order_summary| # Iterate over order_summary hashes
+      next unless order_summary && order_summary[:date] && order_summary.key?(:total)
+      totals_by_date[order_summary[:date]] ||= { count: 0, total_paid: 0, total_pending: 0 } # Adjusted for payment status
+      totals_by_date[order_summary[:date]][:count] += 1
+      if order_summary[:payment_status] == "Paid"
+        totals_by_date[order_summary[:date]][:total_paid] += (order_summary[:total] || 0)
+      else
+        totals_by_date[order_summary[:date]][:total_pending] += (order_summary[:total] || 0)
+      end
     end
 
     # Create summary table
     table = Terminal::Table.new do |t|
       t.title = "Orders Generated"
-      t.headings = ["Date", "Order Count", "Total Sales"]
+      #MODIFICATION: Updated headings for clarity
+      t.headings = ["Date", "Order ID", "Time", "Total", "Tip", "Tax", "Employee", "Tender", "Payment Status", "Payment ID"] # Added Tip, Tax, Payment ID
 
-      totals_by_date.sort.each do |date, data|
+      #MODIFICATION: Iterate through orders (which are now hashes) and populate rows
+      orders.sort_by { |o| [o[:date], o[:time]] }.each do |order_summary|
         t.add_row [
-          date,
-          data[:count],
-          "$#{(data[:total] / 100.0).round(2)}"
+          order_summary[:date],
+          order_summary[:id],
+          order_summary[:time],
+          "$#{(order_summary[:total] / 100.0).round(2)}",
+          "$#{((order_summary[:tip_amount] || 0) / 100.0).round(2)}", # Display tip
+          "$#{((order_summary[:tax_amount] || 0) / 100.0).round(2)}", # Display tax
+          order_summary[:employee],
+          order_summary[:tender_label] || order_summary[:tender] || "N/A", # Use tender_label if available
+          order_summary[:payment_status],
+          order_summary[:payment_id] || "N/A" # Display payment ID
         ]
       end
 
       t.add_separator
 
-      # Add totals row
+      # Add totals summary by date
+      totals_by_date.sort.each do |date, data|
+        t.add_row [date, "#{data[:count]} orders", "",
+                   "Paid: $#{(data[:total_paid] / 100.0).round(2)}",
+                   "Tips: $#{(data[:total_paid] / 100.0).round(2)}", # Show total tips
+                   "Taxes: $#{(data[:total_paid] / 100.0).round(2)}", # Show total taxes
+                   "", "", ""]
+      end
+
+      t.add_separator
+
+      # Add overall totals row
       total_count = orders.count
-      total_sales = orders.sum { |o| o[:total] }
-      t.add_row ["TOTAL", total_count, "$#{(total_sales / 100.0).round(2)}"]
+      total_sales_paid = orders.sum { |o| (o && o[:total] && o[:payment_status] == "Paid") ? o[:total] : 0 }
+      total_sales_pending = orders.sum { |o| (o && o[:total] && o[:payment_status] != "Paid") ? o[:total] : 0 }
+      total_tips = orders.sum { |o| (o && o[:tip_amount] && o[:payment_status] == "Paid") ? o[:tip_amount] : 0 }
+      total_taxes = orders.sum { |o| (o && o[:tax_amount] && o[:payment_status] == "Paid") ? o[:tax_amount] : 0 }
+
+      t.add_row ["TOTALS", "#{total_count} orders", "",
+                 "Paid: $#{(total_sales_paid / 100.0).round(2)}",
+                 "Tips: $#{(total_tips / 100.0).round(2)}", # Show total tips
+                 "Taxes: $#{(total_taxes / 100.0).round(2)}", # Show total taxes
+                 "Pending: $#{(total_sales_pending / 100.0).round(2)}", "", "", ""]
     end
 
     puts table
   end
 
   def get_item_modifiers(item_id)
-    response = make_request(:get, "items/#{item_id}/modifier_groups")
-    return [] unless response && response["elements"]
-
-    response["elements"].map do |group|
-      # Get modifiers for this group
-      modifiers_response = make_request(:get, "modifier_groups/#{group["id"]}/modifiers")
-      group["modifiers"] = modifiers_response["elements"] if modifiers_response && modifiers_response["elements"]
-      group
-    end
+    # Use the InventoryService to get modifier groups and their modifiers for the item
+    # Ensure item_id is not nil or empty before making the API call
+    return [] if item_id.nil? || item_id.empty?
+    @services_manager.inventory.get_modifier_groups_for_item(item_id)
   end
 
-  def calculate_tax_amount(line_items)
+  def calculate_tax_amount(line_items_elements) # Expecting the 'elements' array
     total_tax = 0
+    return 0 unless line_items_elements && line_items_elements.is_a?(Array)
 
-    line_items.each do |line_item|
-      item = line_item[:item]
-      quantity = line_item[:quantity]
-      base_price = item["price"] * quantity
+    line_items_elements.each do |line_item| # Iterate over elements if it's an array of line items
+      # Assuming line_item structure is like: { "item" => {...}, "price" => ..., "modifications" => { "elements" => [...] } }
+      # or directly the line item hash if not wrapped further.
+      # The structure from current_order_details["lineItems"]["elements"] should be an array of line item objects.
 
-      # Add modifier prices
-      modifier_total = line_item[:modifiers].sum { |m| m[:price].to_i }
-      item_total = base_price + modifier_total
+      # Safely access item details
+      item_details = line_item["item"]
+      next unless item_details && item_details["id"] # Skip if item details or ID are missing
 
-      # Calculate tax based on tax rates
-      if item["taxRates"]
-        item["taxRates"].each do |tax_rate|
-          rate_percentage = tax_rate["rate"].to_f / 10000.0 # Convert basis points to percentage
-          total_tax += (item_total * rate_percentage).round
+      base_price = line_item["price"] || 0 # Price of the line item itself (already considers quantity if it's from order details)
+
+      # Modifier prices are often included in the line item's price or handled by Clover's total calculation.
+      # If modifiers need to be summed manually from line_item["modifications"]["elements"],
+      # ensure that structure is present and sum their prices.
+      # For now, assuming line_item["price"] is the price for the item *including* its selected modifiers *for its quantity*.
+      # The API usually provides a calculated line item total.
+
+      # If item_details contains its own "price", that's usually the unit price.
+      # line_item["price"] from an order's line item is often the total for that line (unit_price * quantity + modifiers_for_that_item_instance)
+
+      # Tax calculation should be based on the taxable amount of the line item.
+      # If defaultTaxRates is true on the item, Clover applies them. If specific taxRates are on the line_item, those apply.
+
+      taxable_amount_for_line_item = base_price # This is the total price for this line item (incl. quantity & mods)
+
+      # Check for tax rates applied to this specific line item (if API provides this detail)
+      # Or, check tax rates on the original item if line_item doesn't specify.
+      tax_rates_to_apply = line_item["taxRates"]&.[]("elements") || item_details["taxRates"]&.[]("elements")
+
+      if tax_rates_to_apply && tax_rates_to_apply.is_a?(Array)
+        tax_rates_to_apply.each do |tax_rate_ref|
+          # tax_rate_ref might be just { "id": "..." } or could contain the rate.
+          # If it's just an ID, you might need to fetch the full tax rate details.
+          # For simplicity, let's assume `tax_rate_ref` directly has the 'rate' if it's populated by an expand query.
+          # Otherwise, one would fetch @services_manager.tax.get_tax_rate_details(tax_rate_ref["id"])
+          # For the demo, we'll assume 'rate' is present if tax_rates_to_apply exists.
+
+          actual_rate_info = @state.get_entity_by_id('tax_rate', tax_rate_ref["id"]) # Fetch from state by ID
+          next unless actual_rate_info && actual_rate_info["rate"]
+
+          rate_percentage = actual_rate_info["rate"].to_f / 10000.0 # Clover rates are in basis points (1/100 of a percent)
+          total_tax += (taxable_amount_for_line_item * rate_percentage).round
+        end
+      elsif item_details["defaultTaxRates"] # If item uses default merchant tax rates
+        # This logic is more complex as it requires knowing which of the merchant's tax rates apply by default.
+        # The Clover API usually handles this server-side. Manually calculating default tax can be error-prone.
+        # For accurate tax, it's best to rely on the order totals provided by Clover API after all line items are added.
+        # This simulator's `calculate_tax_amount` is an estimation.
+        # If `order.taxAmount` is available from Clover, that's preferred.
+        @logger.warn "Item '#{item_details['name']}' uses defaultTaxRates. Manual tax calculation might be inexact here. Best to use total from API."
+        # As a simplified fallback for default: apply the first 'General Tax' rate found, if any
+        general_tax_rate = @state.get_entities('tax_rate').find { |tr| tr["name"].downcase.include?('general') && tr["rate"] }
+        if general_tax_rate
+          rate_percentage = general_tax_rate["rate"].to_f / 10000.0
+          total_tax += (taxable_amount_for_line_item * rate_percentage).round
         end
       end
     end

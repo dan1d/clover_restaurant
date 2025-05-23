@@ -73,13 +73,17 @@ module CloverRestaurant
           return
         end
 
+        # The incoming total_amount from the simulator is (subtotal_after_discount + tip_amount)
+        # We need to isolate the subtotal_after_discount for the 'amount' field.
+        subtotal_after_discount = total_amount - tip_amount
+
         # Construct payment payload
         payment_data = {
           "order" => { "id" => order_id },
           "tender" => { "id" => selected_tender["id"] },
           "employee" => { "id" => employee_id },
           "offline" => false,
-          "amount" => total_amount - tax_amount,
+          "amount" => subtotal_after_discount, # This should be the order subtotal (after discounts, before tax and tip)
           "tipAmount" => tip_amount,
           "taxAmount" => tax_amount,
           "createdTime" => past_timestamp, # Use past timestamp
@@ -106,6 +110,17 @@ module CloverRestaurant
           }
         }
 
+        logger.info "Detailed Payment Payload for Order ID #{order_id}:"
+        logger.info "  Original total_amount (total_after_discount + tip_amount from simulator): #{total_amount}"
+        logger.info "  Calculated tax_amount: #{tax_amount}"
+        logger.info "  Calculated tip_amount: #{tip_amount}"
+        logger.info "  Payload 'amount' (subtotal_after_discount): #{payment_data["amount"]}"
+        logger.info "  Payload 'tipAmount': #{payment_data["tipAmount"]}"
+        logger.info "  Payload 'taxAmount': #{payment_data["taxAmount"]}"
+        logger.info "  Payload 'tender_id': #{selected_tender["id"]}"
+        logger.info "  Payload 'employee_id': #{employee_id}"
+        logger.info "  Payload JSON: #{payment_data.to_json}" # Log the whole payload
+
         response = make_request(:post, endpoint("orders/#{order_id}/payments"), payment_data)
 
         if response && response["id"]
@@ -114,6 +129,55 @@ module CloverRestaurant
           response
         else
           logger.error "❌ Payment Failed: #{response.inspect}"
+          nil
+        end
+      end
+
+      def create_refund(payment_id, order_id, amount, reason = "MANUAL_REFUND")
+        logger.info "🔄 Processing refund for Payment ID: #{payment_id}, Order ID: #{order_id}, Amount: $#{amount / 100.0}"
+
+        unless payment_id && order_id && amount && amount > 0
+          logger.error "❌ Invalid parameters for refund. Payment ID, Order ID, and positive amount are required."
+          return nil
+        end
+
+        payload = {
+          "amount" => amount,
+          "orderRef" => { "id" => order_id },
+          # "reason" => reason # The API might have specific allowed values or handle it differently.
+          # For a full refund against a payment, often just amount and paymentID are needed for the endpoint.
+          # The endpoint is /v3/merchants/{mId}/payments/{paymentId}/refunds
+          # The payload for this specific endpoint might only need "amount", and sometimes "fullRefund": true/false
+          # Let's simplify the payload for this specific endpoint first.
+          # If it's a full refund, usually no amount is needed, or "fullRefund": true
+          # If partial, amount is needed.
+        }
+
+        # Based on typical Clover refund APIs for a specific payment:
+        # POST /v3/merchants/{mId}/payments/{paymentId}/refunds
+        # Payload: { "amount": <amount_in_cents> } for partial, or { "fullRefund": true } for full.
+        # Let's assume we are doing a partial refund with a specific amount for now.
+        # The `orderRef` is usually not needed if refunding a specific payment directly.
+        # If the API requires orderRef even for payment-specific refund, we keep it.
+        # The provided payload structure might be for a generic refund not tied to a specific payment.
+        # Let's adjust to what POST /payments/{paymentId}/refunds usually expects:
+
+        actual_payload = {
+          "amount" => amount
+          # "orderRef": { "id": order_id } # Keep if API docs for this specific path confirm it.
+          # "reason": reason # Keep if API docs for this specific path confirm it.
+        }
+        # If it's intended to be a full refund, and API supports it, one might send: actual_payload = { "fullRefund": true }
+
+
+        logger.info "Refund payload for payment '#{payment_id}': #{actual_payload.inspect}"
+        response = make_request(:post, endpoint("payments/#{payment_id}/refunds"), actual_payload)
+
+        if response && response["id"]
+          logger.info "✅ Refund Successful: #{response["id"]}. Amount: $#{response.dig("amount") / 100.0}"
+          response
+        else
+          logger.error "❌ Refund Failed for payment '#{payment_id}'. Response: #{response.inspect}"
           nil
         end
       end

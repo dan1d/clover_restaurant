@@ -2,12 +2,14 @@ require_relative "vcr_setup"
 
 module CloverRestaurant
   class BaseService
-    attr_reader :config, :logger
+    attr_reader :config, :logger, :services_manager
 
-    def initialize(config = nil)
-      @config = config || Config.new
-      @logger = Logger.new(STDOUT)
+    def initialize(config, services_manager = nil)
+      @config = config
+      @services_manager = services_manager
+      @logger = @config.logger
       @state = StateManager.new
+      @cache = {}
 
       logger.info "=== Using OAuth token for authentication ==="
       logger.info "=== Service initialized with headers: #{headers.inspect} ==="

@@ -30,62 +30,58 @@ module CloverRestaurant
 
       def create_order(order_data = {})
         logger.info "=== Creating a new order for merchant #{@config.merchant_id} ==="
+        logger.info "Initial order data received: #{order_data.inspect}"
 
-        # # Ensure unique order creation
-        # existing_orders = get_orders(100, 0)
-        # similar_order = existing_orders["elements"]&.find do |order|
-        #   order["employee"]["id"] == order_data["employee"]["id"] &&
-        #     order["customers"]&.any? { |c| c["id"] == order_data["customers"].first["id"] }
-        # end
+        # Extract line items and discount from order_data if provided by the caller
+        # The keys might be symbols or strings depending on how `order_data` is built and passed.
+        # Let's try to access them with .dig to handle both and nil gracefully.
+        custom_line_items = order_data.dig(:line_items) || order_data.dig("line_items")
+        # custom_discount_info = order_data.dig(:discount) || order_data.dig("discount") # For later if we pass discount this way
 
-        # if similar_order
-        #   logger.info "✅ Found existing order (#{similar_order["id"]}). Skipping creation."
-        #   return similar_order
-        # end
+        # Create the basic order shell without line_items initially in this payload
+        # The API /v3/merchants/{mId}/orders doesn't typically accept line_items directly in the create call.
+        # Line items are added in a subsequent step.
+        order_shell_payload = order_data.except(:line_items, :discount, "line_items", "discount")
+        logger.info "Creating order shell with payload: #{order_shell_payload.inspect}"
+        order = make_request(:post, endpoint("orders"), order_shell_payload)
 
-        order = make_request(:post, endpoint("orders"), order_data)
         return nil unless order && order["id"]
-
         order_id = order["id"]
-        total_price = 0
+        logger.info "✅ Order shell created successfully: #{order_id}"
 
-        # Select random items
-        items = begin
-          @services_manager.inventory.get_items["elements"]
-        rescue StandardError
-          []
+        # Add line items if they were provided
+        if custom_line_items && custom_line_items.any?
+          logger.info "Adding #{custom_line_items.size} custom line items to order #{order_id}"
+          custom_line_items.each do |li_data|
+            # Ensure li_data keys are symbols as expected by add_line_item internal mapping
+            item_id = li_data[:item_id] || li_data["item_id"]
+            quantity = li_data[:quantity] || li_data["quantity"]
+            modifications = li_data[:modifications] || li_data["modifications"] || []
+            notes = li_data[:notes] || li_data["notes"]
+            add_line_item(order_id, item_id, quantity, modifications, notes)
+          end
+        else
+          logger.info "No custom line items provided in order_data for order #{order_id}."
+          # REMOVED: Block that added random items
         end
 
-        num_items = rand(1..4)
-        selected_items = items.sample(num_items)
+        # REMOVED: Random discount application from within create_order
+        # This should be handled by simulate_restaurant.rb if specific discounts are desired
 
-        selected_items.each do |item|
-          quantity = rand(1..2)
-          total_price += (item["price"] || 0) * quantity
-          add_line_item(order_id, item["id"], quantity)
-        end
-
-        # Apply discount randomly
-        discounts = begin
-          @services_manager.discount.get_discounts["elements"]
-        rescue StandardError
-          []
-        end
-        if rand < 0.4 && !discounts.empty?
-          discount = discounts.sample
-          apply_discount(order_id, discount["id"])
-        end
-
-        # Finalize order total
-        total = calculate_order_total(order_id)
+        # Finalize order total - this will fetch the order, including line items added above, and calculate
+        # It's important that add_line_item calls are synchronous and complete before this.
+        # However, calculate_order_total itself calls get_order, which fetches the latest state.
+        logger.info "Calculating final total for order #{order_id}"
+        total = calculate_order_total(order_id) # This should now reflect the added line_items
         update_order_total(order_id, total)
 
-        # Process payment after order creation
-        payment_service = @services_manager.payment
-        payment_service.process_payment(order_id, total, order_data["employee"]["id"], order_data["clientCreatedTime"])
+        # Payment processing is handled by simulate_restaurant.rb after this method returns the created order object.
+        # The payment part previously here is removed as it makes more sense to do it in the simulation script
+        # after discounts are also handled there.
 
-        logger.info "✅ Order #{order_id} created with total: #{total / 100.0} USD from 1 month ago"
-        order
+        logger.info "✅ Order #{order_id} creation process completed. Final total calculated: #{total / 100.0} USD."
+        # Return the latest state of the order
+        get_order(order_id)
       end
 
       def update_order(order_id, order_data)
@@ -164,43 +160,71 @@ module CloverRestaurant
         make_request(:delete, endpoint("orders/#{order_id}/line_items/#{line_item_id}"))
       end
 
-      def apply_discount(order_id, discount_id)
-        return
-        logger.info "=== Applying discount #{discount_id} to order #{order_id} ==="
+      def apply_discount(order_id, discount_id, calculated_amount = nil)
+        logger.info "=== Applying discount ID '#{discount_id}' to order '#{order_id}' ==="
 
-        # Fetch discount details to ensure we include the required fields
-        discounts = @services_manager.discount.get_discounts["elements"]
-        discount = discounts.find { |d| d["id"] == discount_id }
+        discount_object = @services_manager.discount.get_discount(discount_id)
 
-        unless discount
-          logger.error "❌ ERROR: Discount ID #{discount_id} not found in available discounts."
+        unless discount_object && discount_object["id"]
+          logger.error "❌ ERROR: Discount ID '#{discount_id}' not found or invalid."
           return nil
         end
 
-        # Ensure payload includes either 'amount' or 'percentage'
         payload = {
-          "discount" => {
-            "id" => discount["id"],
-            "name" => discount["name"]
-          }
+          "discount" => { "id" => discount_object["id"] }, # Reference the existing discount by its ID
+          # The API will use the name, amount/percentage from the discount_id itself.
+          # If we want to apply an ad-hoc amount for this specific order instance based on this discount,
+          # the API structure might differ (e.g. line item level discount or custom order discount)
+          # For an order-level discount applied by ID, it usually uses the discount's own properties.
+          # However, if we want to apply a dynamic calculated amount based on a pre-existing discount template:
         }
 
-        # payload["discount"]["amount"] = rand(1..10) * 100
-        payload["discount"]["percentage"] = "%#{discount["percentage"]}" if discount["percentage"]
+        # If a specific amount is calculated and needs to be applied for THIS instance of the discount:
+        if calculated_amount
+          # This assumes the API supports overriding the amount for an order-level discount instance.
+          # Typically, an order discount is applied as-is, or it's a custom discount with an amount.
+          # If discount_id is for a $5 off, applying it means $5 off.
+          # If it's 10% off, it's 10% off the relevant total.
+          # The Clover API for POST /orders/{orderId}/discounts usually takes a discount line:
+          # {"name": "Manual Discount", "amount": 500} or {"percentage": "10", "name": "10% Off"}
+          # or references an existing discount by ID: {"discount": {"id": "XYZ"}}
+          # Let's assume for now referencing by ID is the primary goal, and calculated_amount is for logging or future use.
+          # The most straightforward way is to apply the discount by its ID and let Clover calculate its effect.
+          # If `calculated_amount` is to be the actual discount value, we might need to send that.
+          # The original code in simulate_restaurant was trying to send the discount_id AND a calculated amount.
+          # Let's construct a payload that the /discounts endpoint on an order expects.
+          # It can be a reference to an existing discount, or an ad-hoc discount.
 
-        # API requires either amount or percentage
-        if payload["discount"]["amount"].nil? && payload["discount"]["percentage"].nil?
-          logger.error "❌ ERROR: Discount ID #{discount_id} is missing both amount and percentage."
-          payload["discount"]["amount"] = rand(1..10) * 100
-          logger.warn "⚠️ Using random amount: #{payload["discount"]["amount"]}"
+          # To apply a named discount with a specific amount for this order instance:
+          payload["name"] = discount_object["name"] # Use the name from the fetched discount
+          payload["amount"] = calculated_amount   # Use the dynamically calculated amount
+          # Remove the nested "discount" => { "id" } if we are sending name and amount directly for this instance.
+          payload.delete("discount")
+
+          logger.info "Applying pre-calculated amount: #{calculated_amount} for discount '#{discount_object["name"]}'"
+
+        elsif discount_object["amount"] # Fixed amount discount
+          payload["amount"] = discount_object["amount"]
+          payload.delete("discount") # API might prefer amount directly if not just a reference
+          payload["name"] = discount_object["name"]
+          logger.info "Applying fixed amount: #{discount_object["amount"]}"
+        elsif discount_object["percentage"] # Percentage discount
+          payload["percentage"] = discount_object["percentage"].to_s # Ensure it's a string
+          payload.delete("discount") # API might prefer percentage directly
+          payload["name"] = discount_object["name"]
+          logger.info "Applying percentage: #{discount_object["percentage"]}%%"
+        else
+          logger.error "❌ ERROR: Discount ID '#{discount_id}' has no amount or percentage defined."
+          return nil
         end
 
+        logger.info "Discount payload for order '#{order_id}': #{payload.inspect}"
         response = make_request(:post, endpoint("orders/#{order_id}/discounts"), payload)
 
         if response && response["id"]
-          logger.info "✅ Successfully applied discount ID #{discount_id} to order #{order_id}"
+          logger.info "✅ Successfully applied discount to order '#{order_id}'. Discount instance ID: #{response["id"]}"
         else
-          logger.error "❌ ERROR: Failed to apply discount #{discount_id} to order #{order_id}. Response: #{response.inspect}"
+          logger.error "❌ ERROR: Failed to apply discount to order '#{order_id}'. Response: #{response.inspect}"
         end
 
         response

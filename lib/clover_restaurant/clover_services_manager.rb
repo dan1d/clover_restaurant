@@ -3,19 +3,22 @@ require "clover_restaurant/config"
 
 module CloverRestaurant
   class CloverServicesManager
-    attr_reader :config, :inventory, :employee, :tax, :customer, :tender, :discount, :order
+    attr_reader :config, :inventory, :employee, :tax, :customer, :tender, :discount, :order, :merchant, :payment
 
     def initialize(config = nil)
       @config = config || Config.new
+      @services = {} # Initialize @services hash
 
-      # Initialize all services with the same config
-      @inventory = Services::InventoryService.new(@config)
-      @employee = Services::EmployeeService.new(@config)
-      @tax = Services::TaxService.new(@config)
-      @customer = Services::CustomerService.new(@config)
-      @tender = Services::TenderService.new(@config)
-      @discount = Services::DiscountService.new(@config)
-      @order = Services::OrderService.new(@config)
+      # Initialize all services with the same config and a reference to this manager
+      @inventory = Services::InventoryService.new(@config, self)
+      @employee = Services::EmployeeService.new(@config, self)
+      @tax = Services::TaxService.new(@config, self)
+      @customer = Services::CustomerService.new(@config, self)
+      @tender = Services::TenderService.new(@config, self)
+      @discount = Services::DiscountService.new(@config, self)
+      @order = Services::OrderService.new(@config, self)
+      @merchant = Services::MerchantService.new(@config, self)
+      @payment = Services::PaymentService.new(@config, self)
     end
 
     # Initialize services lazily to avoid creating unnecessary ones
@@ -68,8 +71,9 @@ module CloverRestaurant
     def fetch_payment_keys
       logger.info "=== Fetching Clover payment encryption keys ==="
       response = begin
-        @services["payment"].get_payment_keys
-      rescue StandardError
+        payment.get_payment_keys
+      rescue StandardError => e
+        logger.error "Error fetching payment keys: #{e.message}"
         nil
       end
 
@@ -92,7 +96,7 @@ module CloverRestaurant
     def create_service(service_name)
       class_name = service_name.split("_").map(&:capitalize).join
       service_class = Services.const_get("#{class_name}Service")
-      service_class.new(@config)
+      service_class.new(@config, self)
     end
 
     def service_names
@@ -104,6 +108,8 @@ module CloverRestaurant
         tax
         tender
         order
+        merchant
+        payment
       ]
     end
   end
