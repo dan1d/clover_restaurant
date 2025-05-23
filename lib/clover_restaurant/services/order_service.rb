@@ -323,6 +323,7 @@ module CloverRestaurant
 
         # Calculate line items total
         order["lineItems"]["elements"].each do |line_item|
+          logger.info "Inspecting line_item in calculate_order_total: #{line_item.inspect}"
           item_price = line_item["price"] || 0
           quantity = line_item["quantity"] || 1
           item_total = item_price * quantity

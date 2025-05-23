@@ -125,7 +125,7 @@ module CloverRestaurant
 
         if response && response["id"]
           logger.info "✅ Payment Successful: #{response["id"]} from 1 month ago"
-          update_order_total(order_id, total_amount + tip_amount)
+          update_order_total(order_id, total_amount)
           response
         else
           logger.error "❌ Payment Failed: #{response.inspect}"

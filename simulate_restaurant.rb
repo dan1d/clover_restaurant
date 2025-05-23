@@ -165,6 +165,25 @@ class RestaurantSimulator
 
         @state.mark_step_completed(step)
         @logger.info "✅ Successfully completed step: #{step}"
+
+        if step == 'menu_items'
+          # Log details of one item directly from Clover to check its price
+          sample_item_from_state = @state.get_entities('menu_item').sample
+          if sample_item_from_state && (sample_item_from_state["clover_id"] || sample_item_from_state["id"])
+            item_id_to_check = sample_item_from_state["clover_id"] || sample_item_from_state["id"]
+            @logger.info "Checking details of sample item ID: #{item_id_to_check} directly from Clover..."
+            fetched_item_details = @services_manager.inventory.get_item(item_id_to_check)
+            @logger.info "Details for item ID #{item_id_to_check} from Clover: #{fetched_item_details.inspect}"
+            if fetched_item_details && fetched_item_details.key?("price")
+              @logger.info "PRICE CHECK: Item ID #{item_id_to_check} has price: #{fetched_item_details["price"]}"
+            else
+              @logger.warn "PRICE CHECK: Item ID #{item_id_to_check} does NOT have a 'price' attribute in the fetched details or fetched_item_details is nil."
+            end
+          else
+            @logger.warn "Could not select a sample menu item from state to check its price."
+          end
+        end
+
       rescue StandardError => e
         @logger.error "❌ Failed to complete step '#{step}': #{e.message}"
         raise
@@ -752,43 +771,12 @@ class RestaurantSimulator
     order = @services_manager.order.create_order(order_data)
     return false unless order && order["id"]
 
-    # Step 2: Add line items with modifiers -- THIS SECTION IS NOW HANDLED BY OrderService#create_order
-    # line_items.each do |line_item|
-    #   item = line_item[:item]
-    #   quantity = line_item[:quantity]
-    #   modifiers = line_item[:modifiers]
-
-    #   line_item_data = {
-    #     "item" => { "id" => item["id"] },
-    #     "name" => item["name"],
-    #     "price" => item["price"],
-    #     "printed" => false,
-    #     "quantity" => quantity
-    #   }
-
-    #   # Add modifiers if present
-    #   if modifiers && !modifiers.empty?
-    #     line_item_data["modifications"] = modifiers.map do |mod|
-    #       {
-    #         "modifier" => { "id" => mod[:id] },
-    #         "name" => mod[:name],
-    #         "price" => mod[:price]
-    #       }
-    #     end
-    #   end
-
-    #   # Create the line item
-    #   @services_manager.order.create_line_item(order["id"], line_item_data)
-    # end
-
-    # Step 3: Calculate totals (This is now done within OrderService#create_order or needs re-evaluation)
-    # For now, assume OrderService#create_order returns an order object with total, or we fetch it.
-    # Let's simplify and assume `order` returned from `create_order` might have totals, or we fetch them.
-    # The `total` variable used for payment should be based on the final order state.
-
-    # Fetch the fresh order details, especially if totals are calculated server-side after line items.
-    current_order_details = @services_manager.order.get_order(order["id"])
-    return false unless current_order_details
+    # The 'order' object returned from create_order is already the result of a final get_order call
+    # in the service layer, so it should contain the total and latest details.
+    # We will use 'order' directly, renaming it to 'current_order_details' for clarity in subsequent logic.
+    current_order_details = order
+    # No need for: current_order_details = @services_manager.order.get_order(order["id"])
+    # The check 'return false unless current_order_details' is implicitly handled by 'return false unless order && order["id"]' above.
 
     total_from_order = current_order_details["total"] || 0 # Get total from the order object
 
@@ -796,15 +784,15 @@ class RestaurantSimulator
     if discount
       discount_amount = calculate_discount_amount(discount, total_from_order) # Calculate discount on the actual subtotal/total
       if discount_amount > 0
-        @logger.info "Attempting to apply discount ID '#{discount["id"]}' of #{discount_amount} to order '#{order["id"]}'"
-        applied_discount_line = @services_manager.order.apply_discount(order["id"], discount["id"], discount_amount)
+        @logger.info "Attempting to apply discount ID '#{discount["id"]}' of #{discount_amount} to order '#{current_order_details['id']}'"
+        applied_discount_line = @services_manager.order.apply_discount(current_order_details["id"], discount["id"], discount_amount)
         if applied_discount_line && applied_discount_line["id"]
           # If discount application affects total, Clover API often returns the updated order or discount line.
           # We might need to re-fetch order or adjust total_after_discount based on response.
           # For now, assume Clover recalculates or the payment step will use the order total from Clover.
           @logger.info "Successfully applied discount. Recalculating total or relying on order's current total for payment."
           # Re-fetch order to get the most up-to-date total after discount application
-          updated_order_details = @services_manager.order.get_order(order["id"])
+          updated_order_details = @services_manager.order.get_order(current_order_details["id"])
           total_after_discount = updated_order_details["total"] || total_from_order - discount_amount if updated_order_details
         else
           @logger.warn "Failed to apply discount or no confirmation of discount effect on total. Using pre-discount total for payment or manual adjustment."
@@ -822,6 +810,7 @@ class RestaurantSimulator
     logger.info "  total_from_order: #{total_from_order}"
     logger.info "  discount_amount (if discount applied): #{discount_amount || 'N/A'}"
     logger.info "  total_after_discount: #{total_after_discount}"
+    logger.info "  FULL ORDER DETAILS PRE-PAYMENT: #{current_order_details.to_json}"
     # DEBUG LOGGING END
 
     # Step 5: Process payment
@@ -833,7 +822,7 @@ class RestaurantSimulator
         @logger.error "No suitable tender found for payment. Order: #{current_order_details['id']}"
         # Update order with a note about payment failure due to no tender
         @services_manager.order.update_order(current_order_details["id"], { "note" => "Payment failed: No suitable tender." })
-        return order # Return order even if payment fails, summary will show pending
+        return current_order_details # Return order even if payment fails, summary will show pending
       end
 
       # Define employee_id_for_payment (ensure this is defined before use)
@@ -878,7 +867,7 @@ class RestaurantSimulator
         # Update order with a note about payment failure
         @services_manager.order.update_order(current_order_details["id"], { "note" => "Payment failed: #{payment_response.inspect}" })
         #MODIFICATION: Return the order object even if payment fails, so it can be logged in summary
-        return order # Return order, summary will show payment as pending/failed
+        return current_order_details # Return order, summary will show payment as pending/failed
       end
       payment_id = payment_response["id"]
       paid_amount = payment_response["amount"] # This is the subtotal part of the payment
@@ -886,11 +875,11 @@ class RestaurantSimulator
       # Update order state to paid
       @services_manager.order.update_order(current_order_details["id"], { "state" => "paid", "paymentState" => "PAID" })
       #MODIFICATION: Add payment details to the order object for summary
-      order["payment_status"] = "Paid"
-      order["tender_label"] = tender["label"] # Use the fetched tender's label
-      order["payment_id"] = payment_id
-      order["tip_amount"] = tip_amount_for_payment_service # Log tip
-      order["tax_amount"] = tax_amount_for_payment_service # Log tax
+      current_order_details["payment_status"] = "Paid"
+      current_order_details["tender_label"] = tender["label"] # Use the fetched tender's label
+      current_order_details["payment_id"] = payment_id
+      current_order_details["tip_amount"] = tip_amount_for_payment_service # Log tip
+      current_order_details["tax_amount"] = tax_amount_for_payment_service # Log tax
 
       # Simulate a partial refund (e.g., 5% chance)
       if rand < 0.05 && paid_amount > 0 # Ensure there's something to refund
@@ -906,19 +895,29 @@ class RestaurantSimulator
       # Update order with a note about no payment processed
       @services_manager.order.update_order(current_order_details["id"], { "note" => "No payment processed: Total was not positive." })
       #MODIFICATION: Add payment status to the order object for summary
-      order["payment_status"] = "NoPayment (ZeroTotal)"
-      order["tip_amount"] = 0 # No tip if no payment
-      order["tax_amount"] = 0 # No tax if no payment
+      current_order_details["payment_status"] = "NoPayment (ZeroTotal)"
+      current_order_details["tip_amount"] = 0 # No tip if no payment
+      current_order_details["tax_amount"] = 0 # No tax if no payment
 
     end
 
-    #MODIFICATION: If order was returned (even if payment failed), update its attributes from current_order_details
-    if order && current_order_details
-      order["total"] = current_order_details["total"] || 0 # Ensure total is from the definitive source
-      order["original_total_from_order_service"] = total_from_order # Keep track of this for debugging
+    #MODIFICATION: If order was returned (even if payment fails), update its attributes from current_order_details
+    # Fetch the LATEST order details after any payment attempt or note update
+    # This re-fetch IS important here to get the absolute latest state after payment/notes.
+    final_order_details = @services_manager.order.get_order(current_order_details["id"])
+    logger.info "DEBUG: FULL ORDER DETAILS POST-PAYMENT/POST-NOTE: #{final_order_details.to_json}"
+
+    # Ensure current_order_details (which is the 'order' object we've been working with)
+    # gets updated with any final details for the summary.
+    if final_order_details
+      current_order_details["total"] = final_order_details["total"] || 0
+      current_order_details["paymentState"] = final_order_details["paymentState"]
+      current_order_details["note"] = final_order_details["note"]
+      # Keep the original total_from_order for debugging if needed, but ensure 'total' is the final one.
+      current_order_details["original_total_from_order_service"] = total_from_order
     end
 
-    order # Return the original order object, potentially modified with payment status
+    current_order_details # Return the (potentially modified) order object
   end
 
   def process_payment(order_id, employee_id, tender_id, amount, timestamp) # This local method is unused.

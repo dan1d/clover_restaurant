@@ -323,6 +323,11 @@ module CloverRestaurant
         detailed_modifier_groups
       end
 
+      def get_item(item_id)
+        logger.info "=== Fetching item #{item_id} for merchant #{@config.merchant_id} ==="
+        make_request(:get, endpoint("items/#{item_id}"))
+      end
+
       private
 
       def create_item(item_data)

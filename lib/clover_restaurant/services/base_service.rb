@@ -6,7 +6,7 @@ module CloverRestaurant
       def initialize(config = nil)
         @config = config || CloverRestaurant.config
         @logger = @config.logger
-        @state = StateManager.new
+        @state = StateManager.new(@config.db_path || 'clover_state.db', @logger)
 
         logger.info "=== Using OAuth token for authentication ==="
         logger.info "=== Service initialized with headers: #{headers.inspect} ==="
@@ -17,14 +17,20 @@ module CloverRestaurant
       protected
 
       def make_request(method, url, payload = nil, query_params = nil)
-        # Check if this exact request has been made before
-        cache_key = generate_cache_key(method, url, payload)
-        cached_response = @state.get_step_data(cache_key)
+        @logger.info "MR_PRE_GK: method=#{method}, url=#{url}, payload_present=#{!payload.nil?}, query_params_class=#{query_params.class}, query_params_nil=#{query_params.nil?}, query_params_empty=#{query_params&.empty?}"
+        @logger.info "MR_PRE_GK_QP_INSPECT: #{query_params.inspect}"
 
-        if cached_response && !force_request?(method)
-          logger.info "Using cached response for #{method} #{url}"
-          return cached_response
-        end
+        # Check if this exact request has been made before
+        # cache_key = generate_cache_key(method, url, payload, query_params) # DISABLED CACHING
+        # @logger.info "MR_POST_GK: cache_key_in_mr = '#{cache_key}'" # DISABLED CACHING
+
+        # cached_response = @state.get_step_data(cache_key) # DISABLED CACHING
+
+        # if cached_response && !force_request?(method) # DISABLED CACHING
+        #   logger.info "Using cached response for #{method} #{url}" # DISABLED CACHING
+        #   return cached_response # DISABLED CACHING
+        # end # DISABLED CACHING
+        logger.info "CACHE DISABLED: Bypassing cache lookup for #{method} #{url}"
 
         full_url = build_url(url, query_params)
 
@@ -63,10 +69,17 @@ module CloverRestaurant
 
         parsed_response = handle_response(response)
 
-        # Cache successful responses for idempotent methods
-        if response.code.between?(200, 299) && !force_request?(method)
-          @state.mark_step_completed(cache_key, parsed_response)
-        end
+        # Cache successful responses for idempotent methods or if not a mutating method
+        # if response.code.between?(200, 299) # DISABLED CACHING
+        #   if [:get, :head, :options].include?(method.downcase) && !force_request?(method) # Only cache safe, idempotent methods # DISABLED CACHING
+        #     @state.mark_step_completed(cache_key, parsed_response) # DISABLED CACHING
+        #   elsif [:post, :put, :delete].include?(method.downcase) # DISABLED CACHING
+        #     # If a mutating request was successful, clear relevant GET caches for that URL path # DISABLED CACHING
+        #     @logger.info "BS_CLEAR_CACHE: Attempting to clear cache for URL: '#{url}' after #{method.to_s.upcase} request." # DISABLED CACHING
+        #     @state.clear_cache_for_url_path(url) # url is the base path without query params # DISABLED CACHING
+        #   end # DISABLED CACHING
+        # end # DISABLED CACHING
+        logger.info "CACHE DISABLED: Bypassing cache write and invalidation for #{method} #{url}"
 
         parsed_response
       rescue RestClient::Exception => e
@@ -118,18 +131,51 @@ module CloverRestaurant
         raise "Request failed with status #{error.http_code}: #{error_response.to_json}"
       end
 
-      def generate_cache_key(method, url, payload)
+      def generate_cache_key(method, url, payload, query_params = nil)
+        # Sanitize URL to be FS-friendly and consistent
+        sane_url = url.gsub(%r{[^a-zA-Z0-9_/.-]}, '_') # Allow basic path chars
+
+        @logger.info "GK_ENTRY: method=#{method}, url=#{url}, payload_present=#{!payload.nil?}, query_params_class=#{query_params.class}, query_params_nil=#{query_params.nil?}, query_params_empty=#{query_params&.empty?}"
+        @logger.info "GK_QP_INSPECT: #{query_params.inspect}"
+        @logger.info "CACHE DISABLED: generate_cache_key called but result will not be used."
+
         components = [
           method.to_s.upcase,
-          url.gsub(/[^a-zA-Z0-9]/, '_'),
-          payload ? Digest::MD5.hexdigest(payload.to_json) : 'no_payload'
+          sane_url
         ]
-        components.join('_')
+
+        is_get = (method == :get)
+        has_query_params = !!query_params
+        query_params_not_empty = query_params && !query_params.empty? # Ensure query_params is not nil before calling .empty?
+
+        @logger.info "GK_COND_CHECK: is_get=#{is_get}, has_query_params=#{has_query_params}, query_params_not_empty=#{query_params_not_empty}"
+
+        if is_get && has_query_params && query_params_not_empty
+          @logger.info "GK_BRANCH: GET with query_params"
+          # Sort query params for consistent key order
+          sorted_query_string = URI.encode_www_form(query_params.sort_by { |k, _| k.to_s })
+          components << Digest::MD5.hexdigest(sorted_query_string)
+        elsif payload # For POST, PUT etc.
+          @logger.info "GK_BRANCH: Payload present (POST/PUT)"
+          components << Digest::MD5.hexdigest(payload.to_json)
+        else
+          @logger.info "GK_BRANCH: Fallback (GET no query, DELETE, etc.)"
+          components << 'no_payload_or_query' # For GET without query, or other methods without payload
+        end
+
+        key = components.join('_')
+        @logger.info "CACHE_KEY_GEN: Generated cache key: #{key} for method: #{method}, url: #{url}, query_params: #{query_params.inspect}"
+        key
       end
 
       def force_request?(method)
         # Never cache DELETE requests or force-refresh flags
-        method == :delete || @config.force_refresh
+        # We cache GET, HEAD, OPTIONS. We don't cache POST, PUT, DELETE.
+        # force_request? should determine if we *bypass* a read from cache for GET/HEAD/OPTIONS.
+        # Mutating methods (POST, PUT, DELETE) should always make a request and not read from cache.
+        # ![:get, :head, :options].include?(method.downcase) || @config.force_refresh # ORIGINAL LOGIC
+        @logger.info "CACHE DISABLED: force_request? will always return true."
+        true # CACHE DISABLED: Always force request
       end
     end
   end

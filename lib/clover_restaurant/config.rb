@@ -2,7 +2,7 @@ require 'logger'
 
 module CloverRestaurant
   class Config
-    attr_accessor :merchant_id, :oauth_token, :environment, :log_level, :force_refresh
+    attr_accessor :merchant_id, :oauth_token, :environment, :log_level, :force_refresh, :cache_enabled
 
     def initialize
       @merchant_id = ENV['CLOVER_MERCHANT_ID']
@@ -10,6 +10,7 @@ module CloverRestaurant
       @environment = ENV['CLOVER_ENVIRONMENT'] || 'https://sandbox.dev.clover.com/'
       @log_level = ENV['LOG_LEVEL'] ? Logger.const_get(ENV['LOG_LEVEL']) : Logger::INFO
       @force_refresh = ENV['FORCE_REFRESH'] == 'true'
+      @cache_enabled = ENV['CACHE_ENABLED'] ? ENV['CACHE_ENABLED'] == 'true' : false # Default to false (cache disabled)
 
       validate!
     end

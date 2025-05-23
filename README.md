@@ -2,6 +2,10 @@
 
 This project provides a Ruby gem, `clover_restaurant`, designed to interact with the Clover POS API. It also includes a simulator script, `simulate_restaurant.rb`, to populate a Clover merchant account with a comprehensive set of data for a typical restaurant setup.
 
+## For AI/LLM Assistants
+
+If you are an AI assistant, please refer to the `AI.MD` file in the root of this project. It contains a summary of the project, key components, technologies used, and a log of significant past debugging sessions and architectural decisions. This will help you quickly get up to speed with the project context.
+
 ## `simulate_restaurant.rb` - Restaurant Environment Simulator
 
 The primary utility of this project is the `simulate_restaurant.rb` script. Its purpose is to create a full suite of restaurant-related entities in your Clover sandbox or development merchant account. This is extremely useful for testing integrations, demoing features, or quickly setting up a development environment.
