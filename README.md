@@ -1,79 +1,65 @@
-# Clover Restaurant Gem
+# Clover Restaurant Gem & Simulator
 
-A Ruby gem that provides a clean interface for interacting with Clover POS restaurant data in sandbox environments. This gem facilitates the extraction and transformation of restaurant data from Clover's API for integration with QuickBooks.
+This project provides a Ruby gem, `clover_restaurant`, designed to interact with the Clover POS API. It also includes a simulator script, `simulate_restaurant.rb`, to populate a Clover merchant account with a comprehensive set of data for a typical restaurant setup.
 
-## Features
+## `simulate_restaurant.rb` - Restaurant Environment Simulator
 
-- Simplified Clover API client for restaurant data
-- Sandbox environment support for testing
-- Data models for common restaurant entities
-- Sales data aggregation and transformation
-- Category and menu item mapping utilities
+The primary utility of this project is the `simulate_restaurant.rb` script. Its purpose is to create a full suite of restaurant-related entities in your Clover sandbox or development merchant account. This is extremely useful for testing integrations, demoing features, or quickly setting up a development environment.
 
-## Installation
+### Features of the Simulator:
 
-Add this line to your application's Gemfile:
+*   **Resets State:** Can clear previously generated data for a fresh start.
+*   **Comprehensive Setup:** Creates essential restaurant entities, including:
+    *   Tax Rates (e.g., Sales Tax, Alcohol Tax)
+    *   Categories (e.g., Appetizers, Entrees, Drinks)
+    *   Modifier Groups & Modifiers (e.g., Temperature, Add-ons, Sides)
+    *   Menu Items (with pricing, descriptions, and category assignments)
+    *   Employee Roles (e.g., Manager, Server, Bartender)
+    *   Employees (randomly generated with roles and PINs)
+    *   Shifts (clocks in employees to create shift data)
+*   **Idempotent Steps:** If a step has been completed previously (and not reset), the script will skip it, allowing for resumption.
+*   **Detailed Logging:** Provides informative output about the setup process.
 
-```ruby
-gem 'clover_restaurant'
-```
+### Prerequisites:
 
-And then execute:
+1.  **Ruby Environment:** Ensure you have Ruby installed.
+2.  **Bundler:** Install bundler if you haven't: `gem install bundler`
+3.  **Dependencies:** Navigate to the project root and run `bundle install` to install required gems.
+4.  **Clover API Credentials:**
+    *   Set up a `.env` file in the project root with your Clover API token and merchant ID:
+        ```
+        CLOVER_API_TOKEN=your_api_token_here
+        CLOVER_MERCHANT_ID=your_merchant_id_here
+        # Optional: CLOVER_ENVIRONMENT=https://api.clover.com/ (for production, defaults to sandbox)
+        ```
 
-```bash
-bundle install
-```
+### How to Run the Simulator:
 
-## Usage
+1.  Navigate to the `clover_restaurant` directory.
+2.  Make sure the script is executable: `chmod +x simulate_restaurant.rb`
+3.  Run the script:
+    ```bash
+    ./simulate_restaurant.rb
+    ```
+4.  **To reset all previously generated data and start fresh:**
+    ```bash
+    ./simulate_restaurant.rb --reset
+    ```
 
-```ruby
-# Initialize the client
-client = CloverRestaurant::Client.new(
-  api_key: 'your_api_key',
-  merchant_id: 'your_merchant_id',
-  sandbox: true
-)
+The script will then proceed to set up all the necessary entities in your specified Clover merchant account.
 
-# Fetch daily sales
-sales = client.daily_sales(date: Date.today)
+## Gem Development (clover_restaurant)
 
-# Get menu categories
-categories = client.categories
+The `clover_restaurant` gem provides a suite of services to interact with various Clover API endpoints.
 
-# Get menu items
-items = client.menu_items
+(Information about gem structure, specific service usage, and advanced configuration would go here if the focus was purely on the gem's library usage. For now, the emphasis is on the simulator.)
 
-# Get payment methods
-payments = client.payment_methods
-```
+### Contributing
 
-## Configuration
+Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
 
-```ruby
-CloverRestaurant.configure do |config|
-  config.sandbox = true # Use Clover sandbox environment
-  config.api_version = 'v3'
-  config.timeout = 30 # API timeout in seconds
-end
-```
+Please make sure to update tests as appropriate.
 
-## Data Models
+### License
 
-- `CloverRestaurant::Sale`
-- `CloverRestaurant::Category`
-- `CloverRestaurant::MenuItem`
-- `CloverRestaurant::PaymentMethod`
-- `CloverRestaurant::Modifier`
-
-## Development
-
-1. Clone the repository
-2. Run `bundle install`
-3. Run `rake spec` to run the tests
-4. Create a new branch for your feature
-5. Submit a pull request
-
-## Related Projects
-
-- `clover_quickbooks_sync_api` - Main Rails API using this gem
-- `clover-quickbooks-react-ui` - Frontend interface
+[MIT](https://opensource.org/licenses/MIT)

@@ -82,22 +82,24 @@ module CloverRestaurant
 
         created_items = []
 
-        categories.each do |category|
-          items = generate_items_for_category(category["name"])
+        categories.each do |category_from_state|
+          items = generate_items_for_category(category_from_state["name"])
           items.each do |item|
             # Ensure proper category association
+            # Use category_from_state["clover_id"] which holds the actual ID from StateManager
+            actual_category_id = category_from_state["clover_id"]
             item_data = item.merge({
-              "categories" => [{ "id" => category["id"] }],
-              "category" => { "id" => category["id"] }
+              "categories" => [{ "id" => actual_category_id }],
+              "category" => { "id" => actual_category_id }
             })
-
+            logger.info "Attempting to create item '#{item["name"]}' for category ID '#{actual_category_id}' (Name: '#{category_from_state["name"]}') with payload: #{item_data.inspect}"
             created_item = create_item(item_data)
             if created_item && created_item["id"]
-              logger.info "✅ Created item '#{created_item["name"]}' in category '#{category["name"]}'"
+              logger.info "✅ Created item '#{created_item["name"]}' in category '#{category_from_state["name"]}'"
 
               # Associate relevant modifier groups based on category and item
               relevant_groups = get_relevant_modifier_groups(
-                category["name"],
+                category_from_state["name"],
                 created_item["name"],
                 modifier_groups["elements"]
               )
