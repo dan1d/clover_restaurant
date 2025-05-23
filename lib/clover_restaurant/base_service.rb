@@ -4,134 +4,133 @@ module CloverRestaurant
   class BaseService
     attr_reader :config, :logger
 
-    def initialize(custom_config = nil)
-      @config = custom_config || CloverRestaurant.configuration
-      @services_manager = CloverRestaurant::CloverServicesManager.new
-      @config.validate!
-      @logger = @config.logger
+    def initialize(config = nil)
+      @config = config || Config.new
+      @logger = Logger.new(STDOUT)
+      @state = StateManager.new
 
-      # Use API key instead of OAuth token if provided
-      if @config.api_key
-        @logger.info "=== Using API key for authentication ==="
-        @auth_token = @config.api_key
-      else
-        @logger.info "=== Using OAuth token for authentication ==="
-        @auth_token = @config.api_token
+      logger.info "=== Using OAuth token for authentication ==="
+      logger.info "=== Service initialized with headers: #{headers.inspect} ==="
+      logger.info "=== Merchant ID: #{@config.merchant_id} ==="
+      logger.info "=== Environment: #{@config.environment} ==="
+    end
+
+    protected
+
+    def make_request(method, url, payload = nil, query_params = nil)
+      # Check if this exact request has been made before
+      cache_key = generate_cache_key(method, url, payload)
+      cached_response = @state.get_step_data(cache_key)
+
+      if cached_response && !force_request?(method)
+        logger.info "Using cached response for #{method} #{url}"
+        return cached_response
       end
 
-      @headers = {
-        "Authorization" => "Bearer #{@auth_token}",
-        "Content-Type" => "application/json",
-        "Accept" => "application/json"
-      }
+      full_url = build_url(url, query_params)
 
-      @logger.info "=== Service initialized with headers: #{@headers.inspect} ==="
-      @logger.info "=== Merchant ID: #{@config.merchant_id} ==="
-      @logger.info "=== Environment: #{@config.environment} ==="
-    end
-
-    def make_request(method, endpoint, payload = nil, query_params = {}, retry_options = {})
-      url = "#{@config.environment}#{endpoint.sub(%r{^/}, "")}"
-
-      # Append query params if provided
-      if query_params && !query_params.empty?
-        query_string = query_params.map { |k, v| "#{k}=#{URI.encode_www_form_component(v.to_s)}" }.join("&")
-        url = "#{url}?#{query_string}"
-      end
-
-      # Generate a unique cache key for this request
-      cassette_name = generate_cassette_name(method, url, payload)
-      puts "PAYLOAD: #{payload}"
-      # logger.info "Using VCR Cassette: #{cassette_name}"
-
-      # response = VCR.use_cassette(cassette_name) do
-      response = send_http_request(method, url, payload)
-      # end
-
-      handle_response(response)
-    end
-
-    def endpoint(path)
-      "v3/merchants/#{@config.merchant_id}/#{path.sub(%r{^/}, "")}"
-    end
-
-    def v2_endpoint(path)
-      "v2/merchant/#{@config.merchant_id}/#{path.sub(%r{^/}, "")}"
-    end
-
-    private
-
-    def send_http_request(method, url, payload)
       logger.info "======== REQUEST ========"
-      logger.info "METHOD: #{method.upcase}"
-      logger.info "URL: #{url}"
-      logger.info "HEADERS: #{@headers.inspect}"
+      logger.info "METHOD: #{method.to_s.upcase}"
+      logger.info "URL: #{full_url}"
+      logger.info "HEADERS: #{headers}"
 
-      if payload && method != :get
+      if payload
         logger.info "PAYLOAD: #{payload.inspect}"
         logger.info "PAYLOAD JSON: #{payload.to_json}"
       end
 
-      start_time = Time.now
+      start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
       response = case method
-                 when :get
-                   HTTParty.get(url, headers: @headers)
-                 when :post
-                   HTTParty.post(url, headers: @headers, body: payload.to_json)
-                 when :put
-                   HTTParty.put(url, headers: @headers, body: payload.to_json)
-                 when :delete
-                   HTTParty.delete(url, headers: @headers)
-                 else
-                   raise "Unsupported HTTP method: #{method}"
-                 end
+      when :get
+        RestClient.get(full_url, headers)
+      when :post
+        RestClient.post(full_url, payload.to_json, headers)
+      when :put
+        RestClient.put(full_url, payload.to_json, headers)
+      when :delete
+        RestClient.delete(full_url, headers)
+      else
+        raise "Unsupported HTTP method: #{method}"
+      end
 
-      end_time = Time.now
+      end_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      duration = (end_time - start_time) * 1000 # Convert to milliseconds
 
       logger.info "======== RESPONSE ========"
-      logger.info "TIME: #{(end_time - start_time) * 1000} ms"
+      logger.info "TIME: #{duration} ms"
       logger.info "STATUS: #{response.code}"
-      logger.info "BODY: #{response.body ? response.body[0..500] : "<empty>"}"
+      logger.info "BODY: #{response.body}"
 
-      response
-    rescue StandardError => e
-      logger.error "EXCEPTION DURING HTTP REQUEST: #{e.class.name}: #{e.message}"
-      raise ServiceError, "HTTP request failed: #{e.message}"
+      parsed_response = handle_response(response)
+
+      # Cache successful responses for idempotent methods
+      if response.code.between?(200, 299) && !force_request?(method)
+        @state.mark_step_completed(cache_key, parsed_response)
+      end
+
+      parsed_response
+    rescue RestClient::Exception => e
+      logger.error "REQUEST FAILED (#{e.http_code}): #{e.response.body}"
+      handle_error(e)
+    end
+
+    def endpoint(path)
+      "v3/merchants/#{@config.merchant_id}/#{path}"
+    end
+
+    private
+
+    def headers
+      {
+        'Authorization' => "Bearer #{@config.oauth_token}",
+        'Content-Type' => 'application/json',
+        'Accept' => 'application/json'
+      }
+    end
+
+    def build_url(url, query_params = nil)
+      full_url = url.start_with?('http') ? url : "#{@config.environment}#{url}"
+      return full_url unless query_params
+
+      uri = URI(full_url)
+      uri.query = URI.encode_www_form(query_params)
+      uri.to_s
     end
 
     def handle_response(response)
-      case response.code
-      when 200..299
-        return true unless response.body && !response.body.empty?
+      return nil if response.body.empty?
 
-        begin
-          JSON.parse(response.body)
-        rescue JSON::ParserError => e
-          logger.error "JSON parsing error: #{e.message}"
-          raise APIError, "JSON parsing error: #{e.message}"
-        end
-      when 405
-        logger.error "METHOD NOT ALLOWED ERROR (405): #{response.body}"
-        raise APIError, "Method not allowed (405): #{response.body}"
-      when 401
-        logger.error "AUTHENTICATION FAILED: #{response.body}"
-        raise AuthenticationError, "Authentication failed: #{response.body}"
-      when 404
-        logger.error "RESOURCE NOT FOUND: #{response.body}"
-        raise ResourceNotFoundError, "Resource not found: #{response.body}"
-      when 429
-        logger.error "RATE LIMIT EXCEEDED: #{response.body}"
-        raise RateLimitError, "Rate limit exceeded: #{response.body}"
-      else
-        logger.error "REQUEST FAILED (#{response.code}): #{response.body}"
-        raise APIError, "Request failed with status #{response.code}: #{response.body}"
+      begin
+        JSON.parse(response.body)
+      rescue JSON::ParserError => e
+        logger.error "Failed to parse response: #{e.message}"
+        raise "Invalid JSON response: #{response.body}"
       end
     end
 
-    def generate_cassette_name(method, url, payload)
-      payload_hash = payload.nil? ? "" : Digest::SHA256.hexdigest(payload.to_json)
-      "#{method}_#{Digest::SHA256.hexdigest(url)}_#{payload_hash}"
+    def handle_error(error)
+      error_response = begin
+        JSON.parse(error.response.body)
+      rescue
+        { "message" => error.response.body }
+      end
+
+      raise "Request failed with status #{error.http_code}: #{error_response.to_json}"
+    end
+
+    def generate_cache_key(method, url, payload)
+      components = [
+        method.to_s.upcase,
+        url.gsub(/[^a-zA-Z0-9]/, '_'),
+        payload ? Digest::MD5.hexdigest(payload.to_json) : 'no_payload'
+      ]
+      components.join('_')
+    end
+
+    def force_request?(method)
+      # Never cache DELETE requests or force-refresh flags
+      method == :delete || @config.force_refresh
     end
 
     # Clears the VCR cache

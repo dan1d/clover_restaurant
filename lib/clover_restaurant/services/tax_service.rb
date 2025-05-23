@@ -22,6 +22,7 @@ module CloverRestaurant
 
       def create_tax_rate(tax_rate_data)
         logger.info "=== Creating new tax rate for merchant #{@config.merchant_id} ==="
+        logger.info "Tax rate data: #{tax_rate_data.inspect}"
         make_request(:post, endpoint("tax_rates"), tax_rate_data)
       end
 
@@ -165,48 +166,32 @@ module CloverRestaurant
       def create_standard_tax_rates
         logger.info "Creating standard tax rates"
 
-        # Define standard tax rates
         standard_rates = [
           {
             name: "Sales Tax",
-            rate: 8.875, # NYC sales tax rate
-            is_default: true
+            rate: 887, # 8.87%
+            isDefault: true
           },
           {
             name: "Alcohol Tax",
-            rate: 10.875, # Sales tax + alcohol tax
-            is_default: false
-          },
-          {
-            name: "Takeout Tax",
-            rate: 8.875, # Same as sales tax but separate for reporting
-            is_default: false
-          },
-          {
-            name: "Delivery Tax",
-            rate: 8.875, # Same as sales tax but separate for reporting
-            is_default: false
+            rate: 1087, # 10.87%
+            isDefault: false
           }
         ]
 
         created_rates = []
 
         standard_rates.each do |rate_data|
-          # Convert percentage to basis points (multiply by 100)
-          basis_points = (rate_data[:rate] * 100).to_i
-
-          tax_rate = {
-            "name" => rate_data[:name],
-            "rate" => basis_points,
-            "isDefault" => rate_data[:is_default]
-          }
-
-          created_rate = create_tax_rate(tax_rate)
-          if created_rate && created_rate["id"]
-            logger.info "✅ Created tax rate: #{created_rate["name"]} (#{created_rate["rate"] / 100.0}%)"
-            created_rates << created_rate
-          else
-            logger.error "❌ Failed to create tax rate: #{tax_rate["name"]}"
+          begin
+            rate = create_tax_rate(rate_data)
+            if rate && rate["id"]
+              logger.info "✅ Created tax rate: #{rate["name"]} (#{rate["rate"].to_f / 100}%)"
+              created_rates << rate
+            else
+              logger.error "❌ Failed to create tax rate: #{rate_data[:name]}"
+            end
+          rescue StandardError => e
+            logger.error "❌ Error creating tax rate #{rate_data[:name]}: #{e.message}"
           end
         end
 

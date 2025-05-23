@@ -1,0 +1,36 @@
+#!/usr/bin/env ruby
+
+require "clover_restaurant"
+require "optparse"
+
+options = {}
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: clover-restaurant [options]"
+
+  opts.on("-r", "--reset", "Reset all state before running") do
+    options[:reset] = true
+  end
+
+  opts.on("--resume", "Resume from last successful step") do
+    options[:resume] = true
+  end
+
+  opts.on("-d", "--delete", "Delete all Clover entities") do
+    options[:delete] = true
+  end
+
+  opts.on("-h", "--help", "Show this help message") do
+    puts opts
+    exit
+  end
+end
+
+parser.parse!
+
+simulator = CloverRestaurant::Simulator::RestaurantSimulator.new
+
+if options[:delete]
+  simulator.delete_everything
+else
+  simulator.run(options)
+end

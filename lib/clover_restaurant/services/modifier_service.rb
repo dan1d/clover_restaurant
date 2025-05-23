@@ -221,7 +221,8 @@ module CloverRestaurant
             next unless group_id
 
             begin
-              make_request(:post, endpoint("modifier_groups/#{group_id}/items/#{item["id"]}"), {})
+              # Using the items/{itemId}/modifier-groups endpoint instead
+              make_request(:post, endpoint("items/#{item["id"]}/modifier-groups"), { "id" => group_id })
               logger.info "  ✓ Assigned '#{group_name}' to '#{item["name"]}'"
             rescue StandardError => e
               logger.error "  ✗ Failed to assign '#{group_name}' to '#{item["name"]}': #{e.message}"

@@ -21,24 +21,54 @@ require "set"
 require "net/http"
 require "logger"
 
-class CloverAutomation
-  # Configuration constants
-  API_VERSION = "v3"
-  DEFAULT_ORDERS_PER_DAY = 2..4
-  DEFAULT_DAYS_RANGE = 30
+class RestaurantSimulator
+  SETUP_STEPS = [
+    'tax_rates',
+    'categories',
+    'modifier_groups',
+    'menu_items',
+    'roles',
+    'employees',
+    'shifts'
+  ]
 
   attr_reader :services_manager, :entity_generator, :logger
 
   def initialize
-    configure_clover
+    @config = CloverRestaurant::Config.new
+    @logger = @config.logger
+    @state = CloverRestaurant::StateManager.new
     setup_services
-    configure_logger
   end
 
-  def run
-    display_header
-    setup_entities
-    generate_past_orders
+  def run(options = {})
+    print_header
+
+    if options[:reset]
+      @logger.info "Resetting all state..."
+      @state.reset_all
+    end
+
+    if options[:resume]
+      @logger.info "Resuming from last successful step..."
+    end
+
+    begin
+      setup_entities
+      print_summary
+    rescue StandardError => e
+      @logger.error "FATAL ERROR: #{e.message}"
+      @logger.error e.backtrace.join("\n")
+
+      # Save error state
+      @state.mark_step_completed('last_error', {
+        message: e.message,
+        step: @current_step,
+        time: Time.now.iso8601
+      })
+
+      exit 1
+    end
   end
 
   def delete_everything
@@ -53,17 +83,8 @@ class CloverAutomation
   # Setup and Configuration Methods
   #
 
-  def configure_clover
-    CloverRestaurant.configure do |config|
-      config.merchant_id = ENV["CLOVER_MERCHANT_ID"] || raise("Please set CLOVER_MERCHANT_ID in .env file")
-      config.api_token = ENV["CLOVER_API_TOKEN"] || raise("Please set CLOVER_API_TOKEN in .env file")
-      config.environment = ENV["CLOVER_ENVIRONMENT"] || "https://sandbox.dev.clover.com/"
-      config.log_level = ENV["LOG_LEVEL"] ? Logger.const_get(ENV["LOG_LEVEL"]) : Logger::INFO
-    end
-  end
-
   def setup_services
-    @services_manager = CloverRestaurant::CloverServicesManager.new
+    @services_manager = CloverRestaurant::CloverServicesManager.new(@config)
     @entity_generator = CloverRestaurant::DataGeneration::EntityGenerator.new(
       @services_manager.config, @services_manager
     )
@@ -72,135 +93,175 @@ class CloverAutomation
     @environment = @services_manager.config.environment.chomp("/")
   end
 
-  def configure_logger
-    @logger = Logger.new($stdout)
-    @logger.level = Logger::INFO
-    @logger.formatter = proc do |severity, datetime, progname, msg|
-      formatted_datetime = datetime.strftime("%Y-%m-%d %H:%M:%S")
-      color = case severity
-              when "INFO" then :light_blue
-              when "WARN" then :yellow
-              when "ERROR" then :red
-              else :white
-              end
-      "#{formatted_datetime} [#{severity}] #{msg.to_s.colorize(color)}\n"
-    end
-  end
-
-  def display_header
-    puts "\n#{"=" * 80}".colorize(:cyan)
-    puts "#{"CLOVER AUTOMATION".center(80)}".colorize(:cyan)
-    puts "#{"=" * 80}\n".colorize(:cyan)
-
-    puts "Merchant ID: #{@merchant_id}"
-    puts "Environment: #{@environment}"
+  def print_header
+    puts "\n" + "=" * 80
+    puts "CLOVER AUTOMATION".center(80)
+    puts "=" * 80 + "\n\n"
+    puts "Merchant ID: #{@config.merchant_id}"
+    puts "Environment: #{@config.environment}"
   end
 
   def setup_entities
-    logger.info "Setting up Clover entities..."
+    @logger.info "Setting up Clover entities..."
 
-    # Step 1: Create tax rates first (needed for items)
-    logger.info "Step 1: Creating tax rates..."
-    @services_manager.tax.create_standard_tax_rates
+    SETUP_STEPS.each do |step|
+      @current_step = step
 
-    # Step 2: Create standard categories
-    logger.info "Step 2: Creating restaurant categories..."
-    @entity_generator.create_categories
+      if @state.step_completed?(step)
+        @logger.info "Step '#{step}' already completed, skipping..."
+        next
+      end
 
-    # Step 3: Create modifier groups
-    logger.info "Step 3: Creating modifier groups..."
-    @services_manager.modifier.create_common_modifier_groups
+      @logger.info "Step #{SETUP_STEPS.index(step) + 1}: Creating #{step.gsub('_', ' ')}..."
 
-    # Step 4: Create menu items (with modifiers and tax rates)
-    logger.info "Step 4: Creating menu items..."
-    @entity_generator.create_items
+      begin
+        case step
+        when 'tax_rates'
+          setup_tax_rates
+        when 'categories'
+          setup_categories
+        when 'modifier_groups'
+          setup_modifier_groups
+        when 'menu_items'
+          setup_menu_items
+        when 'roles'
+          setup_roles
+        when 'employees'
+          setup_employees
+        when 'shifts'
+          setup_shifts
+        end
 
-    # Step 5: Create employee roles and employees
-    logger.info "Step 5: Creating employee roles and staff..."
-    roles = @services_manager.employee.create_standard_restaurant_roles
-    @services_manager.employee.create_random_employees(15, roles)
-
-    # Step 6: Create customer base
-    logger.info "Step 6: Creating customer base..."
-    @services_manager.customer.create_random_customers(30)
-
-    # Step 7: Create standard tenders
-    logger.info "Step 7: Creating payment tenders..."
-    @services_manager.tender.create_standard_tenders
-
-    # Step 8: Create standard discounts
-    logger.info "Step 8: Creating standard discounts..."
-    create_standard_discounts
-
-    logger.info "✅ Basic restaurant setup complete"
+        @state.mark_step_completed(step)
+        @logger.info "✅ Successfully completed step: #{step}"
+      rescue StandardError => e
+        @logger.error "❌ Failed to complete step '#{step}': #{e.message}"
+        raise
+      end
+    end
   end
 
-  def create_standard_discounts
-    discounts = [
-      {
-        name: "Happy Hour",
-        percentage: true,
-        amount: 2000, # 20% off
-        maxAmount: nil,
-        minAmount: nil,
-        autoApply: false
-      },
-      {
-        name: "Senior Discount",
-        percentage: true,
-        amount: 1000, # 10% off
-        maxAmount: nil,
-        minAmount: nil,
-        autoApply: false
-      },
-      {
-        name: "Military Discount",
-        percentage: true,
-        amount: 1500, # 15% off
-        maxAmount: nil,
-        minAmount: nil,
-        autoApply: false
-      },
-      {
-        name: "$10 Off $50+",
-        percentage: false,
-        amount: 1000, # $10 off
-        maxAmount: nil,
-        minAmount: 5000, # Minimum $50 order
-        autoApply: false
-      },
-      {
-        name: "Lunch Special",
-        percentage: true,
-        amount: 1500, # 15% off
-        maxAmount: nil,
-        minAmount: nil,
-        autoApply: false
-      }
-    ]
+  def setup_tax_rates
+    return if @state.step_completed?('tax_rates')
 
-    created_discounts = []
+    # First check existing tax rates
+    existing_rates = @services_manager.tax.get_tax_rates
+    if existing_rates && existing_rates["elements"]&.any?
+      @logger.info "Found #{existing_rates["elements"].size} existing tax rates"
+      existing_rates["elements"].each do |rate|
+        @state.record_entity('tax_rate', rate["id"], rate["name"], rate)
+      end
+      return
+    end
 
-    discounts.each do |discount|
-      discount_data = {
-        "name" => discount[:name],
-        "percentage" => discount[:percentage],
-        "amount" => discount[:amount],
-        "maxAmount" => discount[:maxAmount],
-        "minAmount" => discount[:minAmount],
-        "autoApply" => discount[:autoApply]
-      }
+    rates = @services_manager.tax.create_standard_tax_rates
+    rates.each do |rate|
+      @state.record_entity('tax_rate', rate["id"], rate["name"], rate)
+    end
+  end
 
-      created_discount = @services_manager.discount.create_discount(discount_data)
-      if created_discount && created_discount["id"]
-        logger.info "✅ Created discount: #{created_discount["name"]}"
-        created_discounts << created_discount
-      else
-        logger.error "❌ Failed to create discount: #{discount[:name]}"
+  def setup_categories
+    return if @state.step_completed?('categories')
+
+    # Check existing categories
+    existing_categories = @services_manager.inventory.get_categories
+    if existing_categories && existing_categories["elements"]&.any?
+      @logger.info "Found #{existing_categories["elements"].size} existing categories"
+      existing_categories["elements"].each do |category|
+        @state.record_entity('category', category["id"], category["name"], category)
+      end
+      return
+    end
+
+    categories = @services_manager.inventory.create_standard_categories
+    categories.each do |category|
+      @state.record_entity('category', category["id"], category["name"], category)
+    end
+  end
+
+  def setup_modifier_groups
+    return if @state.step_completed?('modifier_groups')
+
+    # Check existing modifier groups
+    existing_groups = @services_manager.inventory.get_modifier_groups
+    if existing_groups && existing_groups["elements"]&.any?
+      @logger.info "Found #{existing_groups["elements"].size} existing modifier groups"
+      existing_groups["elements"].each do |group|
+        @state.record_entity('modifier_group', group["id"], group["name"], group)
+      end
+      return
+    end
+
+    groups = @services_manager.inventory.create_standard_modifier_groups
+    groups.each do |group|
+      @state.record_entity('modifier_group', group["id"], group["name"], group)
+    end
+  end
+
+  def setup_menu_items
+    return if @state.step_completed?('menu_items')
+
+    categories = @state.get_entities('category')
+    modifier_groups = @state.get_entities('modifier_group')
+
+    items = @services_manager.inventory.create_sample_menu_items(categories)
+    items.each do |item|
+      @state.record_entity('menu_item', item["id"], item["name"], item)
+    end
+  end
+
+  def setup_roles
+    return if @state.step_completed?('roles')
+
+    # Check existing roles
+    existing_roles = @services_manager.employee.get_roles
+    if existing_roles && existing_roles["elements"]&.any?
+      @logger.info "Found #{existing_roles["elements"].size} existing roles"
+      existing_roles["elements"].each do |role|
+        @state.record_entity('role', role["id"], role["name"], role)
+      end
+      return
+    end
+
+    roles = @services_manager.employee.create_standard_restaurant_roles
+    roles.each do |role|
+      @state.record_entity('role', role["id"], role["name"], role)
+    end
+  end
+
+  def setup_employees
+    return if @state.step_completed?('employees')
+
+    roles = @state.get_entities('role')
+    employees = @services_manager.employee.create_random_employees(15, roles)
+    employees.each do |employee|
+      @state.record_entity('employee', employee["id"], employee["name"], employee)
+    end
+  end
+
+  def setup_shifts
+    return if @state.step_completed?('shifts')
+
+    employees = @state.get_entities('employee')
+    employees.each do |employee|
+      shift = @services_manager.employee.clock_in(employee["clover_id"])
+      @state.record_entity('shift', shift["id"], "#{employee["name"]}_shift", shift) if shift
+    end
+  end
+
+  def print_summary
+    summary = @state.get_creation_summary
+
+    table = Terminal::Table.new do |t|
+      t.title = "Setup Summary"
+      t.headings = ['Entity Type', 'Count']
+
+      summary.each do |type, count|
+        t.add_row [type, count]
       end
     end
 
-    created_discounts
+    puts "\n" + table.to_s + "\n"
   end
 
   #
@@ -762,12 +823,12 @@ class CloverAutomation
   end
 end
 
-if __FILE__ == $0
-  begin
-    CloverAutomation.new.run
-  rescue StandardError => e
-    puts "\nFATAL ERROR: #{e.message}".colorize(:red)
-    puts e.backtrace.join("\n").colorize(:red)
-    exit 1
-  end
-end
+# Parse command line arguments
+options = {
+  reset: ARGV.include?('--reset'),
+  resume: ARGV.include?('--resume')
+}
+
+# Run the simulator
+simulator = RestaurantSimulator.new
+simulator.run(options)

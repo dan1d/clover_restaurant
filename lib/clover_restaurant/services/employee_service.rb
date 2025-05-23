@@ -379,7 +379,8 @@ module CloverRestaurant
 
         # Get roles if not provided
         roles ||= get_roles
-        return [] unless roles && !roles.empty?
+        return [] unless roles && roles["elements"]
+        roles = roles["elements"]  # Extract the elements array
 
         # Define realistic employee data
         first_names = [
@@ -412,15 +413,22 @@ module CloverRestaurant
           # Select role based on position in restaurant
           role = if i == 0
                   # First employee is always a manager
-                  roles.find { |r| r["name"] == "Restaurant Manager" }
-                elsif i == 1
-                  # Second employee is a shift supervisor
-                  roles.find { |r| r["name"] == "Shift Supervisor" }
+                  roles.find { |r| r["name"] == "Manager" }
+                elsif i < 3
+                  # Next few are servers
+                  roles.find { |r| r["name"] == "Server" }
+                elsif i < 5
+                  # Then some bartenders
+                  roles.find { |r| r["name"] == "Bartender" }
+                elsif i < 7
+                  # A couple hosts
+                  roles.find { |r| r["name"] == "Host" }
                 else
-                  # Other employees are distributed among remaining roles
-                  remaining_roles = roles.reject { |r| ["Restaurant Manager", "Shift Supervisor"].include?(r["name"]) }
-                  remaining_roles.sample
+                  # Rest are kitchen staff
+                  roles.find { |r| r["name"] == "Kitchen Staff" }
                 end
+
+          next unless role # Skip if role not found
 
           # Generate employee data
           first_name = first_names.sample

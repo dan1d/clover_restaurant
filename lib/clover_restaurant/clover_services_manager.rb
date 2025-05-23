@@ -3,15 +3,19 @@ require "clover_restaurant/configuration"
 
 module CloverRestaurant
   class CloverServicesManager
-    attr_reader :config, :services, :logger
+    attr_reader :config, :inventory, :employee, :tax, :customer, :tender, :discount, :order
 
-    def initialize(custom_config = nil)
-      @config = custom_config || CloverRestaurant.configuration
-      @config.validate!
-      @logger = @config.logger
+    def initialize(config = nil)
+      @config = config || Config.new
 
-      @services = {}
-      @cache = {}
+      # Initialize all services with the same config
+      @inventory = Services::InventoryService.new(@config)
+      @employee = Services::EmployeeService.new(@config)
+      @tax = Services::TaxService.new(@config)
+      @customer = Services::CustomerService.new(@config)
+      @tender = Services::TenderService.new(@config)
+      @discount = Services::DiscountService.new(@config)
+      @order = Services::OrderService.new(@config)
     end
 
     # Initialize services lazily to avoid creating unnecessary ones
