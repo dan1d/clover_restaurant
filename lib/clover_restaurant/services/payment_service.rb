@@ -125,7 +125,6 @@ module CloverRestaurant
 
         if response && response["id"]
           logger.info "✅ Payment Successful: #{response["id"]} from 1 month ago"
-          update_order_total(order_id, total_amount)
           response
         else
           logger.error "❌ Payment Failed: #{response.inspect}"
@@ -163,15 +162,14 @@ module CloverRestaurant
         # Let's adjust to what POST /payments/{paymentId}/refunds usually expects:
 
         actual_payload = {
-          "amount" => amount
-          # "orderRef": { "id": order_id } # Keep if API docs for this specific path confirm it.
-          # "reason": reason # Keep if API docs for this specific path confirm it.
+          "amount" => amount,
+          "payment" => { "id" => payment_id } # Specify the payment this refund is for
+          # "fullRefund" => false # Optional: explicitly state it's a partial refund if API supports/requires
         }
-        # If it's intended to be a full refund, and API supports it, one might send: actual_payload = { "fullRefund": true }
 
-
-        logger.info "Refund payload for payment '#{payment_id}': #{actual_payload.inspect}"
-        response = make_request(:post, endpoint("payments/#{payment_id}/refunds"), actual_payload)
+        logger.info "Refund payload for order '#{order_id}' (against payment '#{payment_id}'): #{actual_payload.inspect}"
+        # Change endpoint to be order-centric for refunds
+        response = make_request(:post, endpoint("orders/#{order_id}/refunds"), actual_payload)
 
         if response && response["id"]
           logger.info "✅ Refund Successful: #{response["id"]}. Amount: $#{response.dig("amount") / 100.0}"

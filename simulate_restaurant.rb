@@ -28,6 +28,7 @@ class RestaurantSimulator
     'categories',
     'modifier_groups',
     'menu_items',
+    'discounts',
     'roles',
     'employees',
     'shifts',
@@ -151,6 +152,8 @@ class RestaurantSimulator
           setup_modifier_groups
         when 'menu_items'
           setup_menu_items
+        when 'discounts'
+          setup_discounts
         when 'roles'
           setup_roles
         when 'employees'
@@ -257,6 +260,53 @@ class RestaurantSimulator
     items = @services_manager.inventory.create_sample_menu_items(categories)
     items.each do |item|
       @state.record_entity('menu_item', item["id"], item["name"], item)
+    end
+  end
+
+  def setup_discounts
+    return if @state.step_completed?('discounts')
+
+    # Check existing discounts first
+    existing_discounts = @services_manager.discount.get_discounts
+    if existing_discounts && existing_discounts["elements"]&.any?
+      @logger.info "Found #{existing_discounts["elements"].size} existing discounts."
+      # Check if a good number of standard-looking discounts are present
+      standard_names_pattern = /% Off|Hour|Discount|Special|Customer/i
+      num_existing_standard = existing_discounts["elements"].count { |d| d["name"] =~ standard_names_pattern }
+
+      if num_existing_standard >= 3 # If at least 3 standard-like discounts exist
+        @logger.info "#{num_existing_standard} standard-like discounts found. Assuming setup is sufficient."
+        existing_discounts["elements"].each do |discount|
+          @state.record_entity('discount', discount["id"], discount["name"], discount)
+        end
+        return # Skip creating more
+      else
+        @logger.info "Only #{num_existing_standard} standard-like discounts found. Proceeding to create more."
+      end
+    end
+
+    # If not enough or no existing, create standard ones
+    @logger.info "Creating standard discounts..."
+    created_discounts = @services_manager.discount.create_standard_discounts # This method handles its own internal checks
+
+    if created_discounts && created_discounts.is_a?(Array)
+      created_discounts.each do |discount|
+        # Ensure discount is a hash and has an ID before recording
+        if discount.is_a?(Hash) && discount["id"]
+          @state.record_entity('discount', discount["id"], discount["name"], discount)
+        else
+          @logger.warn "A created discount was not in the expected format or lacked an ID: #{discount.inspect}"
+        end
+      end
+    else
+      @logger.warn "create_standard_discounts did not return an array of discounts as expected: #{created_discounts.inspect}"
+      # Fetch again to be sure, in case some were created but not returned as expected
+      final_check_discounts = @services_manager.discount.get_discounts
+      if final_check_discounts && final_check_discounts["elements"]&.any?
+         final_check_discounts["elements"].each do |discount|
+          @state.record_entity('discount', discount["id"], discount["name"], discount)
+        end
+      end
     end
   end
 
@@ -872,17 +922,17 @@ class RestaurantSimulator
       payment_id = payment_response["id"]
       paid_amount = payment_response["amount"] # This is the subtotal part of the payment
 
-      # Update order state to paid
-      @services_manager.order.update_order(current_order_details["id"], { "state" => "paid", "paymentState" => "PAID" })
+      # Update order state to paid (let Clover determine paymentState)
+      @services_manager.order.update_order(current_order_details["id"], { "state" => "paid" })
       #MODIFICATION: Add payment details to the order object for summary
-      current_order_details["payment_status"] = "Paid"
+      current_order_details["payment_status"] = "Paid (Attempted)" # Reflect that payment was made
       current_order_details["tender_label"] = tender["label"] # Use the fetched tender's label
       current_order_details["payment_id"] = payment_id
       current_order_details["tip_amount"] = tip_amount_for_payment_service # Log tip
       current_order_details["tax_amount"] = tax_amount_for_payment_service # Log tax
 
-      # Simulate a partial refund (e.g., 5% chance)
-      if rand < 0.05 && paid_amount > 0 # Ensure there's something to refund
+      # Simulate a partial refund (e.g., 50% chance now)
+      if rand < 0.5 && paid_amount > 0 # Ensure there's something to refund
         refund_amount = (paid_amount * rand(0.1..0.5)).round # Refund 10-50% of the payment subtotal
         if refund_amount > 0
           @logger.info "Attempting to issue a partial refund of $#{refund_amount / 100.0} for payment '#{payment_id}' on order '#{current_order_details['id']}'."
