@@ -14,6 +14,10 @@ module CloverRestaurant
       validate!
     end
 
+    def api_token
+      @oauth_token
+    end
+
     def validate!
       raise "CLOVER_MERCHANT_ID environment variable is required" unless @merchant_id
       raise "CLOVER_API_TOKEN environment variable is required" unless @oauth_token

@@ -249,7 +249,14 @@ module CloverRestaurant
 
       def assign_modifier_group_to_item(item_id, group_id)
         logger.info "Assigning modifier group #{group_id} to item #{item_id}"
-        make_request(:post, endpoint("items/#{item_id}/modifier-groups"), { "id" => group_id })
+        make_request(:post, endpoint("item_modifier_groups"), {
+          "elements" => [
+            {
+              "modifierGroup" => { "id" => group_id },
+              "item" => { "id" => item_id }
+            }
+          ]
+        })
       end
 
       private

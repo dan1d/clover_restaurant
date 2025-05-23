@@ -167,12 +167,11 @@ module CloverRestaurant
         make_request(:get, endpoint("employees/#{employee_id}/shifts"), nil, { limit: limit, offset: offset })
       end
 
-      def create_shift(shift_data)
-        logger.info "=== Creating new shift ==="
+      def create_shift(employee_id, shift_data)
+        logger.info "=== Creating new shift for employee #{employee_id} ==="
 
         # Check if a similar shift already exists
         if shift_data["employee"] && shift_data["employee"]["id"] && shift_data["inTime"]
-          employee_id = shift_data["employee"]["id"]
           in_time = shift_data["inTime"]
 
           # Get existing shifts for this employee
@@ -193,7 +192,7 @@ module CloverRestaurant
         end
 
         logger.info "Shift data: #{shift_data.inspect}"
-        make_request(:post, endpoint("shifts"), shift_data)
+        make_request(:post, endpoint("employees/#{employee_id}/shifts"), shift_data)
       end
 
       def get_shift(shift_id)
@@ -233,7 +232,7 @@ module CloverRestaurant
         }
 
         logger.info "Clock-in data: #{shift_data.inspect}"
-        create_shift(shift_data)
+        create_shift(employee_id, shift_data)
       end
 
       def clock_out(shift_id)
@@ -377,10 +376,23 @@ module CloverRestaurant
       def create_random_employees(count = 15, roles = nil)
         logger.info "Creating #{count} random employees"
 
+        # Ensure count is an integer
+        count = count.to_i
+
+        logger.info "create_random_employees received roles_param: #{roles.inspect} (class: #{roles.class})"
+
         # Get roles if not provided
         roles ||= get_roles
-        return [] unless roles && roles["elements"]
-        roles = roles["elements"]  # Extract the elements array
+        logger.info "After `roles ||= get_roles`, roles is: #{roles.inspect} (class: #{roles.class})"
+        return [] if roles.nil? || !roles.is_a?(Array) || roles.empty?
+        available_roles = roles # MODIFIED ASSIGNMENT: roles is already the array
+
+        # Find required roles
+        manager_role = available_roles.find { |r| r["name"] == "Manager" }
+        server_role = available_roles.find { |r| r["name"] == "Server" }
+        bartender_role = available_roles.find { |r| r["name"] == "Bartender" }
+        host_role = available_roles.find { |r| r["name"] == "Host" }
+        kitchen_role = available_roles.find { |r| r["name"] == "Kitchen Staff" }
 
         # Define realistic employee data
         first_names = [
@@ -411,24 +423,29 @@ module CloverRestaurant
         # Create employees with appropriate role distribution
         count.times do |i|
           # Select role based on position in restaurant
-          role = if i == 0
-                  # First employee is always a manager
-                  roles.find { |r| r["name"] == "Manager" }
-                elsif i < 3
-                  # Next few are servers
-                  roles.find { |r| r["name"] == "Server" }
-                elsif i < 5
-                  # Then some bartenders
-                  roles.find { |r| r["name"] == "Bartender" }
-                elsif i < 7
-                  # A couple hosts
-                  roles.find { |r| r["name"] == "Host" }
+          role = if i == 0 && manager_role
+                  manager_role
+                elsif i < 3 && server_role
+                  server_role
+                elsif i < 5 && bartender_role
+                  bartender_role
+                elsif i < 7 && host_role
+                  host_role
+                elsif kitchen_role
+                  kitchen_role
                 else
-                  # Rest are kitchen staff
-                  roles.find { |r| r["name"] == "Kitchen Staff" }
+                  # Fallback to any available role
+                  available_roles.sample
                 end
 
           next unless role # Skip if role not found
+
+          # ADDED CHECK: Ensure role is a Hash
+          unless role.is_a?(Hash)
+            logger.warn "Skipping employee creation because role is not a Hash: #{role.inspect}"
+            next
+          end
+          # End of ADDED CHECK
 
           # Generate employee data
           first_name = first_names.sample

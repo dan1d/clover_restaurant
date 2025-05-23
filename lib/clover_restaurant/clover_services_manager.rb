@@ -1,5 +1,5 @@
 require "clover_restaurant/payment_encryptor"
-require "clover_restaurant/configuration"
+require "clover_restaurant/config"
 
 module CloverRestaurant
   class CloverServicesManager
@@ -97,22 +97,13 @@ module CloverRestaurant
 
     def service_names
       %w[
-        merchant
         inventory
-        modifier
         employee
         customer
-        table
-        menu
         discount
-        tax_rate
-        order
-        payment
-        refund
         tax
         tender
-        tip
-        device
+        order
       ]
     end
   end
