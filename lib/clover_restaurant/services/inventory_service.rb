@@ -55,53 +55,67 @@ module CloverRestaurant
         created_categories
       end
 
-      def create_sample_menu_items(categories = nil)
-        logger.info "Creating menu items for all categories"
+      def create_sample_menu_items(categories_from_state = nil)
+        logger.info "Creating menu items and associating with categories"
 
-        # If no categories provided, fetch or create them
-        unless categories && categories.any?
-          existing_categories = get_categories
-          if existing_categories && existing_categories["elements"] && existing_categories["elements"].any?
-            categories = existing_categories["elements"]
-            logger.info "Using #{categories.size} existing categories"
+        unless categories_from_state && categories_from_state.any?
+          existing_categories_data = get_categories
+          if existing_categories_data && existing_categories_data["elements"] && existing_categories_data["elements"].any?
+            categories_from_state = existing_categories_data["elements"].map { |c| {"clover_id" => c["id"], "name" => c["name"]} }
+            logger.info "Using #{categories_from_state.size} existing categories from API"
           else
-            categories = create_standard_categories
-            logger.info "Created #{categories.size} new standard categories"
+            standard_category_objects = create_standard_categories
+            categories_from_state = standard_category_objects.map { |c| {"clover_id" => c["id"], "name" => c["name"]} }
+            logger.info "Created #{categories_from_state.size} new standard categories"
           end
         end
 
-        # Create or get modifier groups
-        modifier_groups = get_modifier_groups
-        if !modifier_groups || !modifier_groups["elements"] || modifier_groups["elements"].empty?
-          logger.info "No modifier groups found, creating standard ones..."
-          modifier_groups = { "elements" => create_standard_modifier_groups }
-        else
-          logger.info "Using existing modifier groups"
-          modifier_groups = { "elements" => modifier_groups["elements"] }
-        end
+        modifier_groups_data = get_modifier_groups
+        current_modifier_groups = if !modifier_groups_data || !modifier_groups_data["elements"] || modifier_groups_data["elements"].empty?
+                                   logger.info "No modifier groups found, creating standard ones..."
+                                   create_standard_modifier_groups
+                                 else
+                                   logger.info "Using existing modifier groups"
+                                   modifier_groups_data["elements"]
+                                 end
 
-        created_items = []
+        all_created_items = []
 
-        categories.each do |category_from_state|
-          items = generate_items_for_category(category_from_state["name"])
-          items.each do |item|
-            # Ensure proper category association
-            # Use category_from_state["clover_id"] which holds the actual ID from StateManager
-            actual_category_id = category_from_state["clover_id"]
-            item_data = item.merge({
-              "categories" => [{ "id" => actual_category_id }],
-              "category" => { "id" => actual_category_id }
+        categories_from_state.each do |category_data|
+          category_clover_id = category_data["clover_id"]
+          category_name = category_data["name"]
+          logger.info "Processing category: \'#{category_name}\' (ID: \'#{category_clover_id}\')"
+
+          items_to_generate = generate_items_for_category(category_name)
+
+          items_to_generate.each do |item_base_properties|
+            # Prepare item payload for creation (without category association initially)
+            item_payload = item_base_properties.transform_keys(&:to_s).merge({
+              "defaultTaxRates" => true # Default value
+              # No "categories" field here
             })
-            logger.info "Attempting to create item '#{item["name"]}' for category ID '#{actual_category_id}' (Name: '#{category_from_state["name"]}') with payload: #{item_data.inspect}"
-            created_item = create_item(item_data)
-            if created_item && created_item["id"]
-              logger.info "✅ Created item '#{created_item["name"]}' in category '#{category_from_state["name"]}'"
 
-              # Associate relevant modifier groups based on category and item
+            logger.info "Attempting to create item '#{item_payload["name"]}'. Payload: #{item_payload.inspect}"
+            created_item = create_item(item_payload)
+
+            if created_item && created_item["id"]
+              item_clover_id = created_item["id"]
+              logger.info "✅ Successfully created item '#{created_item["name"]}' (ID: #{item_clover_id})"
+              all_created_items << created_item
+
+              # Now, associate the newly created item with its category using the new endpoint
+              begin
+                associate_item_with_category_via_category_items(item_clover_id, category_clover_id)
+                logger.info "  ✅ Requested association for item '#{created_item["name"]}' with category '#{category_name}' (ID: '#{category_clover_id}') via category_items endpoint."
+              rescue StandardError => e
+                logger.error "  ❌ Failed to associate item '#{created_item["name"]}' with category '#{category_name}' via category_items: #{e.message}"
+                logger.error "    Error details: #{e.backtrace.join("\n")}"
+              end
+
               relevant_groups = get_relevant_modifier_groups(
-                category_from_state["name"],
+                category_name,
                 created_item["name"],
-                modifier_groups["elements"]
+                current_modifier_groups
               )
 
               relevant_groups.each do |group|
@@ -112,15 +126,12 @@ module CloverRestaurant
                   logger.error "  ❌ Failed to assign modifier group '#{group["name"]}' to item '#{created_item["name"]}': #{e.message}"
                 end
               end
-
-              created_items << created_item
             else
-              logger.error "❌ Failed to create item: #{item["name"]}"
+              logger.error "❌ Failed to create item: #{item_base_properties[:name]}. API response: #{created_item.inspect}"
             end
           end
         end
-
-        created_items
+        all_created_items
       end
 
       def create_modifier_group(group_data)
@@ -260,6 +271,22 @@ module CloverRestaurant
           ]
         })
       end
+
+      # NEW METHOD using POST /v3/merchants/{mId}/category_items
+      def associate_item_with_category_via_category_items(item_id, category_id)
+        logger.info "Associating item ID '#{item_id}' with category ID '#{category_id}' using category_items endpoint."
+        payload = {
+          "elements" => [
+            {
+              "item" => { "id" => item_id },
+              "category" => { "id" => category_id }
+            }
+          ]
+        }
+        # Using the endpoint: /v3/merchants/{mId}/category_items?delete=false
+        make_request(:post, endpoint("category_items?delete=false"), payload)
+      end
+      # END OF NEW METHOD
 
       private
 

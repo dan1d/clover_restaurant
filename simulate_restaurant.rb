@@ -20,6 +20,7 @@ require "fileutils"
 require "set"
 require "net/http"
 require "logger"
+require "optparse"
 
 class RestaurantSimulator
   SETUP_STEPS = [
@@ -29,7 +30,8 @@ class RestaurantSimulator
     'menu_items',
     'roles',
     'employees',
-    'shifts'
+    'shifts',
+    'customers'
   ]
 
   attr_reader :services_manager, :entity_generator, :logger
@@ -56,6 +58,30 @@ class RestaurantSimulator
     begin
       setup_entities
       print_summary
+
+      if options[:generate_orders]
+        @logger.info "Proceeding to generate past orders and payments..."
+        # Define default ranges or allow them to be configurable later
+        # For now, using constants or direct values if they exist, otherwise defaults.
+        # These might be DEFAULT_DAYS_RANGE and DEFAULT_ORDERS_PER_DAY if defined in the class
+        # or we can use sensible defaults like 7 days, 5-15 orders/day.
+        days_to_generate = options.fetch(:days_range, 7) # Default to 7 days
+        orders_per_day = options.fetch(:orders_per_day, {min: 5, max: 15}) # Default to 5-15 orders
+
+        # Convert orders_per_day to a range if it's a hash
+        # Assuming generate_past_orders expects a range for orders_per_day_range
+        orders_per_day_range = if orders_per_day.is_a?(Hash) && orders_per_day[:min] && orders_per_day[:max]
+                                 (orders_per_day[:min]..orders_per_day[:max])
+                               else
+                                 orders_per_day # Use as is if already a range or single number
+                               end
+
+        generate_past_orders(days_to_generate, orders_per_day_range)
+        @logger.info "✅ Order and payment generation completed."
+      else
+        @logger.info "Skipping order generation. Use --generate-orders to enable."
+      end
+
     rescue StandardError => e
       @logger.error "FATAL ERROR: #{e.message}"
       @logger.error e.backtrace.join("\n")
@@ -130,6 +156,8 @@ class RestaurantSimulator
           setup_employees
         when 'shifts'
           setup_shifts
+        when 'customers'
+          setup_customers
         end
 
         @state.mark_step_completed(step)
@@ -249,6 +277,41 @@ class RestaurantSimulator
     end
   end
 
+  def setup_customers
+    return if @state.step_completed?('customers')
+
+    # Check existing customers first (optional, but good practice if API supports efficient lookup)
+    # For this example, we'll just create new ones if the step isn't completed.
+    # If you wanted to check, you might do something like:
+    # existing_customers = @services_manager.customer.get_customers
+    # if existing_customers && existing_customers["elements"]&.any?
+    #   @logger.info "Found #{existing_customers["elements"].size} existing customers"
+    #   existing_customers["elements"].each do |cust|
+    #     @state.record_entity('customer', cust["id"], cust["firstName"] ? "#{cust["firstName"]} #{cust["lastName"]}" : "Customer #{cust["id"]}", cust)
+    #   end
+    #   return
+    # end
+
+    customers = @services_manager.customer.create_random_customers(30) # Create 30 random customers
+    customers.each do |customer|
+      if customer && customer["id"]
+        # Determine a display name for the customer
+        display_name = if customer["firstName"] && customer["lastName"]
+                         "#{customer["firstName"]} #{customer["lastName"]}"
+                       elsif customer["firstName"]
+                         customer["firstName"]
+                       elsif customer["emailAddresses"]&.first&.[]("emailAddress")
+                         customer["emailAddresses"].first["emailAddress"]
+                       else
+                         "Customer #{customer["id"]}"
+                       end
+        @state.record_entity('customer', customer["id"], display_name, customer)
+      else
+        @logger.warn "Failed to create or retrieve ID for a customer: #{customer.inspect}"
+      end
+    end
+  end
+
   def print_summary
     summary = @state.get_creation_summary
 
@@ -312,9 +375,9 @@ class RestaurantSimulator
     logger.info "Loading resources from Clover..."
 
     resources = {
-      items: fetch_with_rescue { @services_manager.inventory.get_items["elements"] },
+      items: fetch_with_rescue { @state.get_entities('menu_item') },
       categories: fetch_with_rescue { @services_manager.inventory.get_categories["elements"] },
-      customers: fetch_with_rescue { @services_manager.customer.get_customers["elements"] },
+      customers: fetch_with_rescue { @state.get_entities('customer') },
       employees: fetch_with_rescue { @services_manager.employee.get_employees["elements"] },
       tenders: filter_safe_tenders(fetch_with_rescue { @services_manager.tender.get_tenders }),
       discounts: fetch_with_rescue { @services_manager.discount.get_discounts["elements"] }
@@ -504,13 +567,13 @@ class RestaurantSimulator
     num_items = rand(1..5) # Random number of items per order
 
     num_items.times do
-      # Randomly select a category
-      category = category_map.values.sample
-      next unless category && category["items"]
+      # Randomly select a list of items from a category
+      items_in_category = category_map.values.sample # items_in_category is an array of items
+      next unless items_in_category && !items_in_category.empty? # MODIFIED: Ensure it's not nil and not empty
 
-      # Randomly select an item from the category
-      item = category["items"].sample
-      next unless item
+      # Randomly select an item from that list
+      item = items_in_category.sample # MODIFIED: Sample directly from items_in_category
+      next unless item # Ensure item is not nil
 
       # Get modifiers for this item
       modifiers = get_item_modifiers(item["id"])
@@ -824,10 +887,28 @@ class RestaurantSimulator
 end
 
 # Parse command line arguments
-options = {
-  reset: ARGV.include?('--reset'),
-  resume: ARGV.include?('--resume')
-}
+options = {}
+OptionParser.new do |opts|
+  opts.banner = "Usage: simulate_restaurant.rb [options]"
+
+  opts.on("--reset", "Reset all existing data before running") do |r|
+    options[:reset] = r
+  end
+
+  opts.on("--resume", "Resume from the last successful step") do |r|
+    options[:resume] = r
+  end
+
+  opts.on("--generate-orders", "Generate past orders and payments after setup") do |g|
+    options[:generate_orders] = g
+  end
+
+  # Potentially add options for days_range and orders_per_day here if desired
+  # opts.on("--days-range DAYS", Integer, "Number of past days to generate orders for") do |days|
+  #   options[:days_range] = days
+  # end
+
+end.parse!
 
 # Run the simulator
 simulator = RestaurantSimulator.new
