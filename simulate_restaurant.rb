@@ -36,6 +36,10 @@ class RestaurantSimulator
     'order_types'
   ]
 
+  # Constants for order generation
+  DEFAULT_DAYS_RANGE = 7
+  DEFAULT_ORDERS_PER_DAY = (5..15)
+
   attr_reader :services_manager, :entity_generator, :logger
 
   def initialize
@@ -58,8 +62,8 @@ class RestaurantSimulator
     end
 
     begin
-      # setup_entities # MODIFICATION: Commented out to skip setup
-      # print_summary # MODIFICATION: Commented out as it depends on setup_entities
+      setup_entities
+      print_summary
 
       if options[:generate_orders]
         @logger.info "Proceeding to generate past orders and payments..."
@@ -211,14 +215,19 @@ class RestaurantSimulator
   def setup_categories
     return if @state.step_completed?('categories')
 
-    # Check existing categories
+    # Check existing categories (excluding deleted ones)
     existing_categories = @services_manager.inventory.get_categories
     if existing_categories && existing_categories["elements"]&.any?
-      @logger.info "Found #{existing_categories["elements"].size} existing categories"
-      existing_categories["elements"].each do |category|
-        @state.record_entity('category', category["id"], category["name"], category)
+      non_deleted_categories = existing_categories["elements"].reject { |cat| cat["deleted"] }
+      if non_deleted_categories.any?
+        @logger.info "Found #{non_deleted_categories.size} existing non-deleted categories"
+        non_deleted_categories.each do |category|
+          @state.record_entity('category', category["id"], category["name"], category)
+        end
+        return
+      else
+        @logger.info "Found #{existing_categories["elements"].size} total categories but all are deleted, creating new ones"
       end
-      return
     end
 
     categories = @services_manager.inventory.create_standard_categories
@@ -230,14 +239,19 @@ class RestaurantSimulator
   def setup_modifier_groups
     return if @state.step_completed?('modifier_groups')
 
-    # Check existing modifier groups
+    # Check existing modifier groups (excluding deleted ones)
     existing_groups = @services_manager.inventory.get_modifier_groups
     if existing_groups && existing_groups["elements"]&.any?
-      @logger.info "Found #{existing_groups["elements"].size} existing modifier groups"
-      existing_groups["elements"].each do |group|
-        @state.record_entity('modifier_group', group["id"], group["name"], group)
+      non_deleted_groups = existing_groups["elements"].reject { |group| group["deleted"] }
+      if non_deleted_groups.any?
+        @logger.info "Found #{non_deleted_groups.size} existing non-deleted modifier groups"
+        non_deleted_groups.each do |group|
+          @state.record_entity('modifier_group', group["id"], group["name"], group)
+        end
+        return
+      else
+        @logger.info "Found #{existing_groups["elements"].size} total modifier groups but all are deleted, creating new ones"
       end
-      return
     end
 
     groups = @services_manager.inventory.create_standard_modifier_groups
@@ -248,6 +262,22 @@ class RestaurantSimulator
 
   def setup_menu_items
     return if @state.step_completed?('menu_items')
+
+    # Check existing menu items first
+    existing_items = @services_manager.inventory.get_all_items
+    if existing_items && existing_items["elements"]&.any?
+      @logger.info "Found #{existing_items["elements"].size} existing menu items"
+      # Check if a reasonable number of items exist (more than just a few test items)
+      if existing_items["elements"].size >= 10
+        @logger.info "Sufficient menu items found (#{existing_items["elements"].size}). Skipping creation."
+        existing_items["elements"].each do |item|
+          @state.record_entity('menu_item', item["id"], item["name"], item)
+        end
+        return
+      else
+        @logger.info "Only #{existing_items["elements"].size} menu items found. Proceeding to create standard menu."
+      end
+    end
 
     categories = @state.get_entities('category')
     modifier_groups = @state.get_entities('modifier_group')
@@ -271,7 +301,7 @@ class RestaurantSimulator
 
       if num_existing_standard >= 3 # If at least 3 standard-like discounts exist
         @logger.info "#{num_existing_standard} standard-like discounts found. Assuming setup is sufficient."
-        existing_discounts["elements"].each do |discount|
+        existing_discounts["elements"].reject { |discount| discount["deleted"] }.each do |discount|
           @state.record_entity('discount', discount["id"], discount["name"], discount)
         end
         return # Skip creating more
@@ -298,7 +328,7 @@ class RestaurantSimulator
       # Fetch again to be sure, in case some were created but not returned as expected
       final_check_discounts = @services_manager.discount.get_discounts
       if final_check_discounts && final_check_discounts["elements"]&.any?
-         final_check_discounts["elements"].each do |discount|
+         final_check_discounts["elements"].reject { |discount| discount["deleted"] }.each do |discount|
           @state.record_entity('discount', discount["id"], discount["name"], discount)
         end
       end
@@ -308,14 +338,19 @@ class RestaurantSimulator
   def setup_roles
     return if @state.step_completed?('roles')
 
-    # Check existing roles
+    # Check existing roles (excluding deleted ones)
     existing_roles = @services_manager.employee.get_roles
     if existing_roles && existing_roles["elements"]&.any?
-      @logger.info "Found #{existing_roles["elements"].size} existing roles"
-      existing_roles["elements"].each do |role|
-        @state.record_entity('role', role["id"], role["name"], role)
+      non_deleted_roles = existing_roles["elements"].reject { |role| role["deleted"] }
+      if non_deleted_roles.any?
+        @logger.info "Found #{non_deleted_roles.size} existing non-deleted roles"
+        non_deleted_roles.each do |role|
+          @state.record_entity('role', role["id"], role["name"], role)
+        end
+        return
+      else
+        @logger.info "Found #{existing_roles["elements"].size} total roles but all are deleted, creating new ones"
       end
-      return
     end
 
     roles = @services_manager.employee.create_standard_restaurant_roles
@@ -435,12 +470,6 @@ class RestaurantSimulator
   def generate_past_orders(days_range = DEFAULT_DAYS_RANGE, orders_per_day_range = DEFAULT_ORDERS_PER_DAY)
     logger.info "Generating orders for the past #{days_range} days..."
 
-    # --- DEBUG: Force 1 day, 1 order ---
-    days_to_generate = 1 # Override for debugging
-    orders_per_day_override = 1 # Override for debugging
-    logger.info "[DEBUG] Overriding to generate 1 order for 1 day."
-    # --- END DEBUG ---
-
     # Load all required data upfront
     resources = load_all_resources
     validate_resources(resources)
@@ -448,20 +477,19 @@ class RestaurantSimulator
     successful_orders = []
 
     # Create orders for each day in the range
-    (1..days_to_generate).each do |days_ago| # MODIFIED to use days_to_generate
+    (1..days_range).each do |days_ago|
       past_date = Time.now - days_ago.days
       date_string = past_date.strftime("%Y-%m-%d")
 
-      # Vary number of orders by day of week - overridden for debug
-      # base_orders = case past_date.wday
-      #              when 5, 6 # Friday and Saturday
-      #                rand(15..25) # Busy weekend
-      #              when 0 # Sunday
-      #                rand(10..15) # Busy brunch
-      #              when 1..4 # Monday to Thursday
-      #                rand(5..10) # Regular weekday
-      #              end
-      base_orders = orders_per_day_override # MODIFIED for debug
+      # Vary number of orders by day of week
+      base_orders = case past_date.wday
+                   when 5, 6 # Friday and Saturday
+                     rand(15..25) # Busy weekend
+                   when 0 # Sunday
+                     rand(10..15) # Busy brunch
+                   when 1..4 # Monday to Thursday
+                     rand(orders_per_day_range) # Regular weekday
+                   end
 
       logger.info "Creating #{base_orders} orders for #{date_string}..."
 

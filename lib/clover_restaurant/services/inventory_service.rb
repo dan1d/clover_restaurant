@@ -4,10 +4,10 @@ module CloverRestaurant
       def create_category(category_data)
         logger.info "Creating new category for merchant #{@config.merchant_id}"
 
-        # Check if category already exists
+        # Check if category already exists (excluding deleted categories)
         existing_categories = get_categories
         if existing_categories && existing_categories["elements"]
-          existing_category = existing_categories["elements"].find { |cat| cat["name"] == category_data["name"] }
+          existing_category = existing_categories["elements"].find { |cat| cat["name"] == category_data["name"] && !cat["deleted"] }
           if existing_category
             logger.info "Category '#{category_data["name"]}' already exists with ID: #{existing_category["id"]}"
             return existing_category
@@ -61,7 +61,7 @@ module CloverRestaurant
         unless categories_from_state && categories_from_state.any?
           existing_categories_data = get_categories
           if existing_categories_data && existing_categories_data["elements"] && existing_categories_data["elements"].any?
-            categories_from_state = existing_categories_data["elements"].map { |c| {"clover_id" => c["id"], "name" => c["name"]} }
+            categories_from_state = existing_categories_data["elements"].reject { |c| c["deleted"] }.map { |c| {"clover_id" => c["id"], "name" => c["name"]} }
             logger.info "Using #{categories_from_state.size} existing categories from API"
           else
             standard_category_objects = create_standard_categories
@@ -137,10 +137,10 @@ module CloverRestaurant
       def create_modifier_group(group_data)
         logger.info "Creating new modifier group for merchant #{@config.merchant_id}"
 
-        # Check if modifier group already exists
+        # Check if modifier group already exists (excluding deleted groups)
         existing_groups = get_modifier_groups
         if existing_groups && existing_groups["elements"]
-          existing_group = existing_groups["elements"].find { |g| g["name"] == group_data["name"] }
+          existing_group = existing_groups["elements"].find { |g| g["name"] == group_data["name"] && !g["deleted"] }
           if existing_group
             logger.info "Modifier group '#{group_data["name"]}' already exists with ID: #{existing_group["id"]}"
             return existing_group
@@ -154,6 +154,11 @@ module CloverRestaurant
       def get_modifier_groups
         logger.info "Fetching modifier groups for merchant #{@config.merchant_id}"
         make_request(:get, endpoint("modifier_groups"))
+      end
+
+      def get_all_items
+        logger.info "Fetching all items for merchant #{@config.merchant_id}"
+        make_request(:get, endpoint("items"))
       end
 
       def create_modifier(group_id, modifier_data)
@@ -328,13 +333,24 @@ module CloverRestaurant
         make_request(:get, endpoint("items/#{item_id}"))
       end
 
-      private
-
       def create_item(item_data)
         logger.info "Creating new item for merchant #{@config.merchant_id}"
+
+        # Check if item already exists by name (excluding deleted items)
+        existing_items = get_all_items
+        if existing_items && existing_items["elements"]
+          existing_item = existing_items["elements"].find { |item| item["name"] == item_data["name"] && !item["deleted"] }
+          if existing_item
+            logger.info "Item '#{item_data["name"]}' already exists with ID: #{existing_item["id"]}"
+            return existing_item
+          end
+        end
+
         logger.info "Item data: #{item_data.inspect}"
         make_request(:post, endpoint("items"), item_data)
       end
+
+      private
 
       def generate_items_for_category(category_name)
         case category_name
