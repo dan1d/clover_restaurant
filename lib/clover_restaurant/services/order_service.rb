@@ -181,33 +181,20 @@ module CloverRestaurant
 
         # If a specific amount is calculated and needs to be applied for THIS instance of the discount:
         if calculated_amount
-          # This assumes the API supports overriding the amount for an order-level discount instance.
-          # Typically, an order discount is applied as-is, or it's a custom discount with an amount.
-          # If discount_id is for a $5 off, applying it means $5 off.
-          # If it's 10% off, it's 10% off the relevant total.
-          # The Clover API for POST /orders/{orderId}/discounts usually takes a discount line:
-          # {"name": "Manual Discount", "amount": 500} or {"percentage": "10", "name": "10% Off"}
-          # or references an existing discount by ID: {"discount": {"id": "XYZ"}}
-          # Let's assume for now referencing by ID is the primary goal, and calculated_amount is for logging or future use.
-          # The most straightforward way is to apply the discount by its ID and let Clover calculate its effect.
-          # If `calculated_amount` is to be the actual discount value, we might need to send that.
-          # The original code in simulate_restaurant was trying to send the discount_id AND a calculated amount.
-          # Let's construct a payload that the /discounts endpoint on an order expects.
-          # It can be a reference to an existing discount, or an ad-hoc discount.
-
-          # To apply a named discount with a specific amount for this order instance:
-          payload["name"] = discount_object["name"] # Use the name from the fetched discount
-          payload["amount"] = calculated_amount   # Use the dynamically calculated amount
+          # Ensure the calculated_amount is negative for the API
+          payload["amount"] = -(calculated_amount.abs) # Make it negative
+          payload["name"] = discount_object["name"]
           # Remove the nested "discount" => { "id" } if we are sending name and amount directly for this instance.
           payload.delete("discount")
 
-          logger.info "Applying pre-calculated amount: #{calculated_amount} for discount '#{discount_object["name"]}'"
+          logger.info "Applying pre-calculated amount: #{payload["amount"]} for discount '#{discount_object["name"]}'"
 
         elsif discount_object["amount"] # Fixed amount discount
-          payload["amount"] = discount_object["amount"]
-          payload.delete("discount") # API might prefer amount directly if not just a reference
+          # Ensure the discount_object's amount is negative for the API
+          payload["amount"] = -(discount_object["amount"].abs) # Make it negative
           payload["name"] = discount_object["name"]
-          logger.info "Applying fixed amount: #{discount_object["amount"]}"
+          payload.delete("discount") # API might prefer amount directly if not just a reference
+          logger.info "Applying fixed amount: #{payload["amount"]}"
         elsif discount_object["percentage"] # Percentage discount
           payload["percentage"] = discount_object["percentage"].to_s # Ensure it's a string
           payload.delete("discount") # API might prefer percentage directly
@@ -227,6 +214,47 @@ module CloverRestaurant
           logger.error "❌ ERROR: Failed to apply discount to order '#{order_id}'. Response: #{response.inspect}"
         end
 
+        response
+      end
+
+      def apply_discount_to_line_item(order_id, line_item_id, discount_id, calculated_amount = nil)
+        logger.info "=== Applying discount ID '#{discount_id}' to line item '#{line_item_id}' in order '#{order_id}' ==="
+
+        discount_object = @services_manager.discount.get_discount(discount_id)
+        unless discount_object && discount_object["id"]
+          logger.error "❌ ERROR: Discount ID '#{discount_id}' not found or invalid for line item discount."
+          return nil
+        end
+
+        payload = {}
+
+        if calculated_amount
+          payload["amount"] = -(calculated_amount.abs) # Ensure negative
+          payload["name"] = discount_object["name"] # Clover often requires name even with amount
+          logger.info "Applying pre-calculated amount: #{payload["amount"]} for discount '#{discount_object["name"]}' to line item '#{line_item_id}'"
+        elsif discount_object["amount"] # Fixed amount discount from discount object
+          payload["amount"] = -(discount_object["amount"].abs)
+          payload["name"] = discount_object["name"]
+          logger.info "Applying fixed amount from discount object: #{payload["amount"]} to line item '#{line_item_id}'"
+        elsif discount_object["percentage"] # Percentage discount from discount object
+          payload["percentage"] = discount_object["percentage"].to_s # Ensure string
+          payload["name"] = discount_object["name"]
+          logger.info "Applying percentage from discount object: #{payload["percentage"]}%% to line item '#{line_item_id}'"
+        else # Fallback to applying by ID if no specific amount/percentage logic is hit
+          # This assumes the API can resolve the discount details from the ID for line items.
+          # Often, for line item discounts, specific amount or percentage is preferred in payload.
+          payload["discount"] = { "id" => discount_object["id"] }
+          logger.info "Applying discount by ID '#{discount_object["id"]}' ('#{discount_object["name"]}') to line item '#{line_item_id}'"
+        end
+
+        logger.info "Line item discount payload for order '#{order_id}', line_item '#{line_item_id}': #{payload.inspect}"
+        response = make_request(:post, endpoint("orders/#{order_id}/line_items/#{line_item_id}/discounts"), payload)
+
+        if response && response["id"]
+          logger.info "✅ Successfully applied discount to line item '#{line_item_id}'. Discount instance ID: #{response["id"]}"
+        else
+          logger.error "❌ ERROR: Failed to apply discount to line item '#{line_item_id}'. Response: #{response.inspect}"
+        end
         response
       end
 

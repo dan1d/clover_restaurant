@@ -58,8 +58,8 @@ class RestaurantSimulator
     end
 
     begin
-      setup_entities
-      print_summary
+      # setup_entities # MODIFICATION: Commented out to skip setup
+      # print_summary # MODIFICATION: Commented out as it depends on setup_entities
 
       if options[:generate_orders]
         @logger.info "Proceeding to generate past orders and payments..."
@@ -197,19 +197,14 @@ class RestaurantSimulator
   def setup_tax_rates
     return if @state.step_completed?('tax_rates')
 
-    # First check existing tax rates
-    existing_rates = @services_manager.tax.get_tax_rates
-    if existing_rates && existing_rates["elements"]&.any?
-      @logger.info "Found #{existing_rates["elements"].size} existing tax rates"
-      existing_rates["elements"].each do |rate|
+    @logger.info "Step 3: Creating standard tax rates..."
+    created_rates = @services_manager.tax.create_standard_tax_rates
+
+    if created_rates && created_rates.any?
+      @logger.info "Successfully created or verified #{created_rates.size} standard tax rates."
+      created_rates.each do |rate|
         @state.record_entity('tax_rate', rate["id"], rate["name"], rate)
       end
-      return
-    end
-
-    rates = @services_manager.tax.create_standard_tax_rates
-    rates.each do |rate|
-      @state.record_entity('tax_rate', rate["id"], rate["name"], rate)
     end
   end
 
@@ -493,13 +488,20 @@ class RestaurantSimulator
       customers: fetch_with_rescue { @state.get_entities('customer') },
       employees: fetch_with_rescue { @services_manager.employee.get_employees["elements"] },
       tenders: filter_safe_tenders(fetch_with_rescue { @services_manager.tender.get_tenders }),
-      discounts: fetch_with_rescue { @services_manager.discount.get_discounts["elements"] }
+      discounts: fetch_with_rescue { @services_manager.discount.get_discounts["elements"] },
+      tax_rates: fetch_with_rescue { @services_manager.tax.get_tax_rates["elements"] }
     }
 
     # Pre-organize items by category to avoid duplicate processing
-    resources[:category_map] = organize_items_by_category(resources[:categories], resources[:items])
+    all_items_map = create_item_map(resources[:items])
+    @logger.info "DEBUG LOAD_ALL_RESOURCES: local all_items_map type: #{all_items_map.class}, size: #{all_items_map.size}, content: #{all_items_map.inspect[0..200]}" # DEBUG
+    category_map = create_category_map(resources[:categories], all_items_map)
 
-    logger.info "Resources loaded successfully"
+    resources[:all_items_map] = all_items_map
+    resources[:category_map] = category_map
+    @logger.info "DEBUG LOAD_ALL_RESOURCES: resources[:all_items_map] type: #{resources[:all_items_map].class}, size: #{resources[:all_items_map].size}, content: #{resources[:all_items_map].inspect[0..200]}" # DEBUG
+
+    @logger.info "Resources loaded successfully"
     resources
   end
 
@@ -509,6 +511,12 @@ class RestaurantSimulator
       tender["label"] == "Credit Card" ||
         tender["label"] == "Debit Card" ||
         (tender["labelKey"] && (tender["labelKey"].include?("credit") || tender["labelKey"].include?("debit")))
+    end
+
+    # Log available tender types for debugging
+    @logger.info "Available tender types:"
+    tenders.each do |tender|
+      @logger.info "  - #{tender["label"]} (#{tender["labelKey"]}) - Enabled: #{tender["enabled"]}"
     end
 
     # Create safe tenders if none exist
@@ -544,6 +552,33 @@ class RestaurantSimulator
     safe_tenders
   end
 
+  def create_category_map(categories, all_items_map)
+    category_map = {}
+
+    # Initialize each category in the map
+    categories.each do |category|
+      category_map[category["id"]] = []
+    end
+
+    # Add items to their respective categories
+    all_items_map.each_value do |item|
+      next unless item["categories"] && item["categories"]["elements"]
+
+      item["categories"]["elements"].each do |category|
+        category_id = category["id"]
+        category_map[category_id] ||= []
+        category_map[category_id] << item
+      end
+    end
+
+    # For items without categories, create a "Miscellaneous" category
+    uncategorized = all_items_map.values.select { |item| !item["categories"] || item["categories"]["elements"].empty? }
+    category_map["misc"] = uncategorized unless uncategorized.empty?
+
+    @logger.info "Created category map with #{category_map.keys.size} categories"
+    category_map
+  end
+
   def organize_items_by_category(categories, items)
     category_map = {}
 
@@ -573,12 +608,14 @@ class RestaurantSimulator
       timestamp = generate_timestamp_for_order(date, i, num_orders)
 
       # Generate line items
-      line_items = generate_line_items(resources[:category_map], resources[:items])
+      line_items = generate_line_items(resources[:category_map], resources[:items], resources[:discounts])
 
       # Apply discount sometimes (20% chance)
-      discount = if rand < 0.2 && resources[:discounts] && !resources[:discounts].empty?
-                  resources[:discounts].sample
-                end
+      discount = nil
+      if resources[:discounts] && !resources[:discounts].empty?
+        discount = resources[:discounts].sample
+        @logger.info "Selected discount to attempt: #{discount['name']}" if discount
+      end
 
       # Create the order with all details
       order = create_optimized_order(
@@ -649,7 +686,7 @@ class RestaurantSimulator
       }
 
       # Generate line items and calculate discount
-      line_items_data = generate_line_items(resources[:category_map], resources[:items])
+      line_items_data = generate_line_items(resources[:category_map], resources[:items], resources[:discounts])
       total_price = calculate_total_price(line_items_data)
 
       # Apply discount if needed
@@ -703,55 +740,81 @@ class RestaurantSimulator
     (time.to_i * 1000).to_i # Convert to milliseconds
   end
 
-  def generate_line_items(category_map, all_items)
+  def generate_line_items(category_map, all_items_map, available_discounts = [])
+    # Ensure all_items_map is logged with its actual variable name in this scope
+    @logger.info "DEBUG GENERATE_LINE_ITEMS: Entry: received all_items_map type: #{all_items_map.class}, size: #{all_items_map.size rescue 'N/A'}, content: #{all_items_map.inspect[0..200]}" # DEBUG
     line_items = []
-    num_items = rand(1..3) # Random number of items per order
+    num_items_in_order = rand(5..6) # Number of distinct items in an order
+    @logger.info "Generating #{num_items_in_order} line items for the order."
 
-    num_items.times do
-      # Randomly select a list of items from a category
-      items_in_category = category_map.values.sample # items_in_category is an array of items
-      next unless items_in_category && !items_in_category.empty? # MODIFIED: Ensure it's not nil and not empty
+    # Ensure all_items_map contains detailed item objects, not just IDs
+    # This might require adjustment if all_items_map passed in is just basic info
 
-      # Randomly select an item from that list
-      item = items_in_category.sample # MODIFIED: Sample directly from items_in_category
-      next unless item # Ensure item is not nil
+    # Get a sample of item IDs from the values of the category_map (which should be arrays of item IDs or objects)
+    available_item_ids_or_objects = category_map.values.flatten.uniq
+    selected_item_ids_or_objects = available_item_ids_or_objects.sample(num_items_in_order)
 
-      # Get modifiers for this item
-      # Use item["clover_id"] as items from StateManager store the Clover ID there.
-      item_actual_id = item["clover_id"] || item["id"] # Fallback to item["id"] just in case
-      unless item_actual_id && !item_actual_id.empty?
-        logger.warn "Skipping modifier fetch for item because its ID is missing or empty: #{item.inspect}"
-        modifiers = []
-      else
-        modifiers = get_item_modifiers(item_actual_id)
+    selected_item_ids_or_objects.each do |item_ref|
+      # MODIFICATION: Use helper to get full item details
+      item_details = get_item_details_for_simulation(item_ref, all_items_map)
+      unless item_details && item_details["id"] && item_details["price"]
+        @logger.error "Could not get valid details for item_ref: #{item_ref.inspect}. Skipping this item."
+        next
       end
+      item_actual_id = item_details["id"]
+      item_price = item_details["price"].to_i # Ensure integer for calculations
+
+      quantity = rand(4..8)
       selected_modifiers = []
+      modifiers = item_details["modifierGroups"] && item_details["modifierGroups"]["elements"]
 
       if modifiers && !modifiers.empty?
         modifiers.each do |group|
-          # Skip if no modifiers in group
           next unless group["modifiers"] && !group["modifiers"].empty?
-
-          # Determine how many modifiers to select based on min/max requirements
           min_required = group["minRequired"] || 0
-          max_allowed = group["maxAllowed"] || 1
-          num_to_select = rand(min_required..max_allowed)
-
-          # Randomly select modifiers
-          selected = group["modifiers"].sample(num_to_select)
-          selected_modifiers.concat(selected.map { |m| { id: m["id"], name: m["name"], price: m["price"] } })
+          max_allowed = group["maxAllowed"] || group["modifiers"].size
+          min_required = [min_required, max_allowed, group["modifiers"].size].min
+          num_to_select = 0
+          if min_required > 0
+            num_to_select = rand(min_required..[max_allowed, group["modifiers"].size].min)
+          elsif max_allowed > 0 && group["modifiers"].any?
+            num_to_select = rand(1..[max_allowed, group["modifiers"].size].min)
+          end
+          if num_to_select > 0
+            selected = group["modifiers"].sample(num_to_select)
+            selected_modifiers.concat(selected.map { |m| { "modifier" => { "id" => m["id"] } } })
+            @logger.info "Selected #{selected.size} modifier(s) from group '#{group["name"]}' for item '#{item_actual_id}': #{selected.map { |m| m["name"] }.join(", ")}"
+          end
         end
       end
 
-      # Add the item with its modifiers
-      quantity = rand(1..3)
+      # MODIFICATION: Attempt to add a line-item specific discount (e.g. 20% chance)
+      line_item_discount_data = nil
+      if rand < 0.2 && available_discounts && available_discounts.any? && item_price > 0
+        chosen_discount = available_discounts.sample
+        # For simplicity, let's make it a small fixed amount, like $1 or 10% of item price, whichever is smaller
+        # Ensure this amount is positive here; OrderService will make it negative.
+        discount_amount_value = [100, (item_price * 0.1).round].min
+        if discount_amount_value > 0
+            line_item_discount_data = {
+                discount_id: chosen_discount["id"],
+                discount_name: chosen_discount["name"],
+                calculated_amount: discount_amount_value
+            }
+            @logger.info "Item '#{item_details["name"]}' will attempt line item discount: '#{chosen_discount["name"]}' for $#{discount_amount_value/100.0}"
+        end
+      end
+
       line_items << {
-        item: item,
+        item_id: item_actual_id,
+        name: item_details["name"],
+        price: item_price,
         quantity: quantity,
-        modifiers: selected_modifiers
+        modifications: selected_modifiers,
+        tax_rates: item_details["taxRates"],
+        line_item_discount_info: line_item_discount_data # Store discount info
       }
     end
-
     line_items
   end
 
@@ -770,104 +833,171 @@ class RestaurantSimulator
   end
 
   # Optimized order creation that minimizes API calls
-  def create_optimized_order(timestamp, resources, line_items, discount = nil, total_price = nil)
-    # Step 1: Create the basic order
-    order_type_to_use = @state.get_entities('order_type').sample
-    unless order_type_to_use && order_type_to_use["clover_id"]
-      @logger.error "No order types available in state. Cannot create order."
-      return false # Or raise an error
+  def create_optimized_order(timestamp, resources, prepared_line_items, order_discount = nil, total_price_pre_order_discount = nil)
+    # Step 1: Define Order Type and Note
+    order_type_to_use = @state.get_entities('order_type')&.sample
+    unless order_type_to_use && (order_type_to_use["clover_id"] || order_type_to_use["id"])
+      @logger.error "No order types available in state or missing ID. Cannot create order."
+      return false
     end
+    actual_order_type_id = order_type_to_use["clover_id"] || order_type_to_use["id"]
 
-    order_data = {
+    # Define order_note
+    possible_notes = ["Special instructions for the chef.", "Customer in a hurry.", "Birthday celebration, add a candle if possible.", nil, "Allergic to peanuts.", nil]
+    order_note = possible_notes.sample
+    @logger.info "Order note selected: #{order_note || 'None'}"
+
+    # Employee for the order
+    employee_for_order = resources[:employees]&.sample
+    unless employee_for_order && employee_for_order["id"]
+      @logger.error "No employees available in resources. Cannot assign employee to order."
+      # Depending on requirements, you might assign a default, or fail. For now, let's try to proceed.
+      # employee_for_order_id = nil # Or fetch a default if critical
+    end
+    employee_for_order_id = employee_for_order["id"] if employee_for_order
+
+    order_shell_data = {
+      # "employee" => { "id" => resources[:employees].sample["id"] }, # Replaced by safer logic above
+      "note" => order_note,
+      "orderType" => { "id" => actual_order_type_id },
       "state" => "open",
       "createdTime" => timestamp,
-      "modifiedTime" => timestamp,
-      "orderType" => {
-        "id" => order_type_to_use["clover_id"]
-      }
+      "line_items" => prepared_line_items.map do |pli|
+        {
+          item_id: pli[:item_id],
+          quantity: pli[:quantity],
+          modifications: pli[:modifications],
+          notes: pli[:name]
+        }
+      end
     }
+    # Add employee to payload only if successfully found
+    order_shell_data["employee"] = { "id" => employee_for_order_id } if employee_for_order_id
 
-    # Add employee if available
-    if resources[:employees] && !resources[:employees].empty?
-      order_data["employee"] = { "id" => resources[:employees].sample["id"] }
-    end
+    created_order_object = @services_manager.order.create_order(order_shell_data)
+    return false unless created_order_object && created_order_object["id"]
+    order_id = created_order_object["id"]
 
-    # Add customer if available
-    if resources[:customers] && !resources[:customers].empty?
-      order_data["customer"] = { "id" => resources[:customers].sample["id"] }
-    end
+    @logger.info "Order shell and initial line items created. Order ID: #{order_id}"
+    @logger.info "Initial order object from create_order: #{created_order_object.inspect}"
 
-    # Prepare line_items for OrderService
-    prepared_line_items = line_items.map do |li|
-      item_obj = li[:item]
-      actual_item_id = item_obj["clover_id"] || item_obj["id"]
+    # Fetch the order again to get line item IDs assigned by Clover, as create_order returns the order shell
+    # The line items within created_order_object from create_order might not have their final Clover IDs immediately
+    # or might not be the full objects. So, a fresh get_order is safer.
+    current_order_details = @services_manager.order.get_order(order_id)
+    unless current_order_details && current_order_details["lineItems"] && current_order_details["lineItems"]["elements"]
+        @logger.error "Failed to fetch order details with line item IDs for order #{order_id} after creation. Cannot apply line item discounts."
+        # Decide if we should return false or continue without line item discounts
+    else
+        @logger.info "Fetched order details for line item discount processing: #{current_order_details.inspect}"
+        # Match prepared_line_items (which have our discount_info) with actual created line items from Clover
+        # This matching can be tricky. Simplest might be by item_id and hope there are no duplicates of the *same* item_id
+        # in the `prepared_line_items` before being sent. If `generate_line_items` can produce multiple distinct entries
+        # for the *same* product (e.g. one with discount, one without), this will need careful handling.
+        # For now, assume each entry in `prepared_line_items` corresponds to one in `current_order_details.lineItems.elements`
+        # based on the item's original ID.
 
-      {
-        :item_id => actual_item_id,
-        :quantity => li[:quantity],
-        :modifications => (li[:modifiers] || []).map do |mod|
-          {
-            "modifier" => { "id" => mod[:id] },
-            "name" => mod[:name],
-            "amount" => mod[:price]
-          }
+        clover_line_items = current_order_details["lineItems"]["elements"]
+
+        prepared_line_items.each_with_index do |prepared_li, index|
+            if prepared_li[:line_item_discount_info]
+                # Find the corresponding Clover line item. This is a potential point of failure if order differs.
+                # A robust way would be if `add_line_item` in OrderService returned the created line item ID
+                # and `create_order` could return an array of these.
+                # For now, let's try to find by original item_id and assume order is preserved, or find first match.
+                # This is a simplification and might not work if multiple line items use the same catalog item ID.
+
+                # Attempt to find a match based on the original item_id from `prepared_li`
+                # and hope that `clover_line_items` are in a somewhat predictable order or have unique item IDs for this order.
+                # This is a weak link.
+                matching_clover_li = clover_line_items.find do |cli|
+                    cli["item"] && cli["item"]["id"] == prepared_li[:item_id] && \
+                    !cli.key?(:_processed_for_discount) # Mark as processed to avoid reapplying to same if multiple identical items
+                end
+
+                if matching_clover_li
+                    clover_li_id = matching_clover_li["id"]
+                    discount_info = prepared_li[:line_item_discount_info]
+                    @logger.info "Attempting to apply line item discount '#{discount_info[:discount_name]}' to Clover line item ID '#{clover_li_id}' (Original item ID: '#{prepared_li[:item_id]}')"
+                    @services_manager.order.apply_discount_to_line_item(
+                        order_id,
+                        clover_li_id,
+                        discount_info[:discount_id],
+                        discount_info[:calculated_amount]
+                    )
+                    matching_clover_li[:_processed_for_discount] = true # Mark it
+                else
+                    @logger.warn "Could not find matching Clover line item for prepared item ID '#{prepared_li[:item_id]}' to apply line item discount. Order structure might have changed or item not found."
+                end
+            end
         end
-        # :notes => nil # if you have notes
-      }
+
+        # Clean up our temporary marker
+        clover_line_items.each { |cli| cli.delete(:_processed_for_discount) }
+        # Re-fetch order details after line item discounts are applied to reflect them
+        current_order_details = @services_manager.order.get_order(order_id)
     end
-    order_data["line_items"] = prepared_line_items
 
-    # Create the order (OrderService#create_order will now handle adding these line items)
-    order = @services_manager.order.create_order(order_data)
-    return false unless order && order["id"]
+    # Apply order-level discount IF ONE WAS SELECTED (current logic already tries this)
+    # MODIFICATION: ensure order_discount is not nil before attempting to apply
+    # Use total_price_pre_order_discount if provided, otherwise re-calculate if necessary
+    # The 'discount' parameter is now 'order_discount'
+    # The 'total_price' parameter is now 'total_price_pre_order_discount'
 
-    # The 'order' object returned from create_order is already the result of a final get_order call
-    # in the service layer, so it should contain the total and latest details.
-    # We will use 'order' directly, renaming it to 'current_order_details' for clarity in subsequent logic.
-    current_order_details = order
-    # No need for: current_order_details = @services_manager.order.get_order(order["id"])
-    # The check 'return false unless current_order_details' is implicitly handled by 'return false unless order && order["id"]' above.
+    calculated_total_pre_order_discount = if total_price_pre_order_discount.nil?
+                                            current_order_details["total"] || 0 # Or recalculate from line items
+                                          else
+                                            total_price_pre_order_discount
+                                          end
 
-    total_from_order = current_order_details["total"] || 0 # Get total from the order object
+    if order_discount && order_discount["id"]
+      # discount_amount = calculate_discount_amount(order_discount, total_price)
+      # Corrected: Use calculated_total_pre_order_discount for order-level discount calculation
+      discount_amount_for_order = calculate_discount_amount(order_discount, calculated_total_pre_order_discount)
 
-    # Step 4: Apply discount if present
-    if discount
-      discount_amount = calculate_discount_amount(discount, total_from_order) # Calculate discount on the actual subtotal/total
-      if discount_amount > 0
-        @logger.info "Attempting to apply discount ID '#{discount["id"]}' of #{discount_amount} to order '#{current_order_details['id']}'"
-        applied_discount_line = @services_manager.order.apply_discount(current_order_details["id"], discount["id"], discount_amount)
+      if discount_amount_for_order > 0
+        @logger.info "Attempting to apply order discount ID '#{order_discount["id"]}' of #{discount_amount_for_order} to order '#{current_order_details['id']}' (pre-discount total: #{calculated_total_pre_order_discount})"
+        applied_discount_line = @services_manager.order.apply_discount(current_order_details["id"], order_discount["id"], discount_amount_for_order)
         if applied_discount_line && applied_discount_line["id"]
-          # If discount application affects total, Clover API often returns the updated order or discount line.
-          # We might need to re-fetch order or adjust total_after_discount based on response.
-          # For now, assume Clover recalculates or the payment step will use the order total from Clover.
-          @logger.info "Successfully applied discount. Recalculating total or relying on order's current total for payment."
+          @logger.info "Successfully applied order discount. Relying on order's current total from Clover for payment."
           # Re-fetch order to get the most up-to-date total after discount application
-          updated_order_details = @services_manager.order.get_order(current_order_details["id"])
-          total_after_discount = updated_order_details["total"] || total_from_order - discount_amount if updated_order_details
+          current_order_details = @services_manager.order.get_order(current_order_details["id"]) # IMPORTANT re-fetch
+          total_after_order_discount = current_order_details["total"] # This should be the true total from Clover
         else
-          @logger.warn "Failed to apply discount or no confirmation of discount effect on total. Using pre-discount total for payment or manual adjustment."
-          total_after_discount = total_from_order # Fallback or keep as is if apply_discount failed
+          @logger.warn "Failed to apply order discount or no confirmation of discount effect on total. Using pre-discount total for payment or manual adjustment."
+          # total_after_order_discount = total_price # Fallback
+          total_after_order_discount = current_order_details["total"] # Rely on whatever total Clover has at this point
         end
       else
-        total_after_discount = total_from_order
+        # total_after_order_discount = total_price
+        total_after_order_discount = current_order_details["total"] # No order discount applied, use current total
       end
     else
-      total_after_discount = total_from_order
+      # total_after_order_discount = total_price
+      total_after_order_discount = current_order_details["total"] # No order discount attempted, use current total
     end
 
     # DEBUG LOGGING START
     logger.info "DEBUG: Before payment block for Order ID #{current_order_details['id']}:"
-    logger.info "  total_from_order: #{total_from_order}"
-    logger.info "  discount_amount (if discount applied): #{discount_amount || 'N/A'}"
-    logger.info "  total_after_discount: #{total_after_discount}"
+    # logger.info "  total_from_order: #{total_price}"
+    logger.info "  calculated_total_pre_order_discount: #{calculated_total_pre_order_discount}"
+    # logger.info "  discount_amount (if discount applied): #{discount_amount || 'N/A'}"
+    logger.info "  discount_amount_for_order (order-level): #{discount_amount_for_order || 'N/A'}"
+    # logger.info "  total_after_discount: #{total_after_discount}"
+    logger.info "  total_after_order_discount (used for payment calcs): #{total_after_order_discount}"
     logger.info "  FULL ORDER DETAILS PRE-PAYMENT: #{current_order_details.to_json}"
     # DEBUG LOGGING END
 
     # Step 5: Process payment
-    if total_after_discount > 0 # Use total_after_discount for payment
+    # if total_after_discount > 0 # Use total_after_discount for payment
+    if total_after_order_discount > 0 # MODIFIED: Use the total after order-level discount for payment logic
+
       # Select a tender (prefer non-card tenders in sandbox)
-      # Ensure tenders are available
-      tender = resources[:tenders].find { |t| !t["label"].downcase.include?("card") } || resources[:tenders].first
+      # Ensure tenders are available - prioritize external payment and cash
+      tender = resources[:tenders].find { |t| t["labelKey"] == "com.clover.tender.external_payment" && t["enabled"] } ||
+               resources[:tenders].find { |t| t["labelKey"] == "com.clover.tender.cash" } ||
+               resources[:tenders].find { |t| !t["label"].downcase.include?("card") } ||
+               resources[:tenders].first
       unless tender
         @logger.error "No suitable tender found for payment. Order: #{current_order_details['id']}"
         # Update order with a note about payment failure due to no tender
@@ -884,17 +1014,18 @@ class RestaurantSimulator
       end
 
       tip_percentage = rand(15..25) # Tip between 15% and 25%
-      tip_amount_for_payment_service = ((total_after_discount * tip_percentage) / 100.0).round
-      tip_amount_for_payment_service = [0, tip_amount_for_payment_service].max # Ensure tip is not negative
+      # tip_amount_for_payment_service = ((total_after_discount * tip_percentage) / 100.0).round
+      tip_amount_for_payment_service = ((total_after_order_discount * tip_percentage) / 100.0).round
+      tip_amount_for_payment_service = [0, tip_amount_for_payment_service].max
 
-      # tax_amount_for_payment_service is now correctly calculated by the updated calculate_tax_amount
-      tax_amount_for_payment_service = calculate_tax_amount(current_order_details["lineItems"]&.[]("elements"))
+      tax_amount_for_payment_service = calculate_tax_amount(current_order_details["lineItems"]&.[]("elements"), resources[:tax_rates])
 
-      total_for_payment_service = total_after_discount + tip_amount_for_payment_service # This is subtotal + tip for PaymentService
+      # total_for_payment_service = total_after_discount + tip_amount_for_payment_service
+      total_for_payment_service = total_after_order_discount + tip_amount_for_payment_service
 
-      # DEBUG LOGGING START (Ensure this is before the call)
       logger.info "DEBUG: Values for PaymentService call on Order ID #{current_order_details['id']}:"
-      logger.info "  total_after_discount (subtotal used for tip/tax calcs): #{total_after_discount}"
+      # logger.info "  total_after_discount (subtotal used for tip/tax calcs): #{total_after_discount}"
+      logger.info "  total_after_order_discount (subtotal used for tip/tax calcs): #{total_after_order_discount}"
       logger.info "  tip_percentage: #{tip_percentage}%"
       logger.info "  calculated tip_amount_for_payment_service (to PaymentService): #{tip_amount_for_payment_service}"
       logger.info "  calculated tax_amount_for_payment_service (to PaymentService): #{tax_amount_for_payment_service}"
@@ -932,16 +1063,16 @@ class RestaurantSimulator
       current_order_details["tax_amount"] = tax_amount_for_payment_service # Log tax
 
       # Simulate a partial refund (e.g., 50% chance now)
-      if rand < 0.5 && paid_amount > 0 # Ensure there's something to refund
-        refund_amount = (paid_amount * rand(0.1..0.5)).round # Refund 10-50% of the payment subtotal
-        if refund_amount > 0
-          @logger.info "Attempting to issue a partial refund of $#{refund_amount / 100.0} for payment '#{payment_id}' on order '#{current_order_details['id']}'."
-          @services_manager.payment.create_refund(payment_id, current_order_details["id"], refund_amount)
-        end
-      end
+      # if paid_amount && paid_amount > 0 # Ensure there's something to refund (paid_amount comes from payment_response["amount"])
+      #   refund_amount = (paid_amount * rand(0.1..0.5)).round # Refund 10-50% of the payment subtotal
+      #   if refund_amount > 0
+      #     @logger.info "Attempting to issue a partial refund of $#{refund_amount / 100.0} for payment '#{payment_id}' on order '#{current_order_details['id']}'."
+      #     @services_manager.payment.create_refund(payment_id, current_order_details["id"], refund_amount)
+      #   end
+      # end
 
     else # total_after_discount <= 0
-      @logger.warn "Total amount for order '#{current_order_details['id']}' is not positive (#{total_after_discount}), skipping payment."
+      @logger.warn "Total amount for order '#{current_order_details['id']}' is not positive (#{total_after_order_discount}), skipping payment."
       # Update order with a note about no payment processed
       @services_manager.order.update_order(current_order_details["id"], { "note" => "No payment processed: Total was not positive." })
       #MODIFICATION: Add payment status to the order object for summary
@@ -964,7 +1095,7 @@ class RestaurantSimulator
       current_order_details["paymentState"] = final_order_details["paymentState"]
       current_order_details["note"] = final_order_details["note"]
       # Keep the original total_from_order for debugging if needed, but ensure 'total' is the final one.
-      current_order_details["original_total_from_order_service"] = total_from_order
+      current_order_details["original_total_from_order_service"] = calculated_total_pre_order_discount #MODIFIED: Use correct pre-discount total
     end
 
     current_order_details # Return the (potentially modified) order object
@@ -1134,22 +1265,63 @@ class RestaurantSimulator
     puts table
   end
 
-  def get_item_modifiers(item_id)
-    # Use the InventoryService to get modifier groups and their modifiers for the item
-    # Ensure item_id is not nil or empty before making the API call
-    return [] if item_id.nil? || item_id.empty?
-    @services_manager.inventory.get_modifier_groups_for_item(item_id)
+  # MODIFICATION: Helper method to get item details, handling cache or direct fetch.
+  def get_item_details_for_simulation(item_id_or_object, all_items_map)
+    # Ensure all_items_map is logged with its actual variable name in this scope
+    @logger.info "DEBUG GET_ITEM_DETAILS: Entry: received all_items_map type: #{all_items_map.class}, size: #{all_items_map.size rescue 'N/A'}, content: #{all_items_map.inspect[0..200]}" # DEBUG
+    if item_id_or_object.is_a?(Hash)
+      # Handle StateManager object structure
+      if item_id_or_object["entity_type"] == "menu_item" && item_id_or_object["clover_id"]
+        item_id_to_fetch = item_id_or_object["clover_id"]
+        # Prefer data from all_items_map if available, as it should be from direct Clover API call
+        return all_items_map[item_id_to_fetch] if all_items_map&.key?(item_id_to_fetch)
+        # Fallback to item_id_or_object[\"data\"] if it exists and looks like an item
+        return item_id_or_object["data"] if item_id_or_object["data"] && item_id_or_object["data"]["id"]
+        # Else, fetch using the clover_id
+        @logger.warn "Item ID #{item_id_to_fetch} (from StateManager object) not in pre-loaded map, fetching directly..."
+        return @services_manager.inventory.get_item(item_id_to_fetch)
+      elsif item_id_or_object['id'] # Already a detailed item object (e.g., from direct API call)
+        return item_id_or_object
+      end
+    elsif item_id_or_object.is_a?(String) # It's an ID string
+      return all_items_map[item_id_or_object] if all_items_map&.key?(item_id_or_object)
+      @logger.warn "Item ID string #{item_id_or_object} not found in pre-loaded map, fetching directly..."
+      return @services_manager.inventory.get_item(item_id_or_object)
+    end
+    @logger.error "get_item_details_for_simulation: Could not determine item details from: #{item_id_or_object.inspect}"
+    nil
   end
 
-  def calculate_tax_amount(line_items_elements) # Expecting the 'elements' array
+  # Helper to create a hash map of items by their ID
+  def create_item_map(items_array)
+    return {} unless items_array.is_a?(Array)
+    items_array.each_with_object({}) do |item_obj, map|
+      # Handle both direct item objects and StateManager entity objects
+      item_id = item_obj['id'] || item_obj['clover_id'] || (item_obj['data'] && item_obj['data']['id'])
+      map[item_id] = item_obj['data'] || item_obj if item_id
+    end
+  end
+
+  # If `order.taxAmount` is available from Clover, that's preferred.
+  def calculate_tax_amount(line_items_elements, all_tax_rates = []) # MODIFICATION: Added all_tax_rates parameter
     total_tax = 0
     return 0 unless line_items_elements && line_items_elements.is_a?(Array)
 
-    line_items_elements.each do |line_item| # Iterate over elements if it's an array of line items
-      # Assuming line_item structure is like: { "item" => {...}, "price" => ..., "modifications" => { "elements" => [...] } }
-      # or directly the line item hash if not wrapped further.
-      # The structure from current_order_details["lineItems"]["elements"] should be an array of line item objects.
+    # Fetch all default tax rates from the provided list
+    # MODIFICATION: Use all_tax_rates parameter instead of @state
+    default_tax_rates_from_param = all_tax_rates.select { |tr| tr["isDefault"] == true }
 
+    # Fallback to any "Sales Tax" if no explicit defaults found
+    if default_tax_rates_from_param.empty?
+      sales_tax = all_tax_rates.find { |tr| tr["name"]&.downcase == 'sales tax' && tr["rate"] }
+      default_tax_rates_from_param << sales_tax if sales_tax
+    end
+
+    if default_tax_rates_from_param.empty?
+        @logger.warn "No default tax rates found in provided list for tax calculation. Taxes may be $0.00."
+    end
+
+    line_items_elements.each do |line_item| # Iterate over elements if it's an array of line items
       # Safely access item details
       item_details = line_item["item"]
       next unless item_details && item_details["id"] # Skip if item details or ID are missing
@@ -1176,13 +1348,8 @@ class RestaurantSimulator
 
       if tax_rates_to_apply && tax_rates_to_apply.is_a?(Array)
         tax_rates_to_apply.each do |tax_rate_ref|
-          # tax_rate_ref might be just { "id": "..." } or could contain the rate.
-          # If it's just an ID, you might need to fetch the full tax rate details.
-          # For simplicity, let's assume `tax_rate_ref` directly has the 'rate' if it's populated by an expand query.
-          # Otherwise, one would fetch @services_manager.tax.get_tax_rate_details(tax_rate_ref["id"])
-          # For the demo, we'll assume 'rate' is present if tax_rates_to_apply exists.
-
-          actual_rate_info = @state.get_entity_by_id('tax_rate', tax_rate_ref["id"]) # Fetch from state by ID
+          # MODIFICATION: Use all_tax_rates parameter to find the tax rate by ID
+          actual_rate_info = all_tax_rates.find { |tr| tr["id"] == tax_rate_ref["id"] }
           next unless actual_rate_info && actual_rate_info["rate"]
 
           rate_percentage = actual_rate_info["rate"].to_f / 10000.0 # Clover rates are in basis points (1/100 of a percent)
@@ -1196,14 +1363,20 @@ class RestaurantSimulator
         # If `order.taxAmount` is available from Clover, that's preferred.
         @logger.warn "Item '#{item_details['name']}' uses defaultTaxRates. Manual tax calculation might be inexact here. Best to use total from API."
         # As a simplified fallback for default: apply the first 'General Tax' rate found, if any
-        general_tax_rate = @state.get_entities('tax_rate').find { |tr| tr["name"].downcase.include?('general') && tr["rate"] }
-        if general_tax_rate
-          rate_percentage = general_tax_rate["rate"].to_f / 10000.0
-          total_tax += (taxable_amount_for_line_item * rate_percentage).round
+        # MODIFICATION: Use the fetched default_tax_rates_from_param
+        if default_tax_rates_from_param.any?
+          default_tax_rates_from_param.each do |default_rate|
+            rate_percentage = default_rate["rate"].to_f / 10000.0
+            total_tax += (taxable_amount_for_line_item * rate_percentage).round
+            @logger.info "Applied default tax rate '#{default_rate['name']}' (#{default_rate['rate']}) to line item amount #{taxable_amount_for_line_item}. Tax this item: #{(taxable_amount_for_line_item * rate_percentage).round}"
+          end
+        else # MODIFICATION: Corrected logger message
+          @logger.warn "Item '#{item_details['name']}' uses defaultTaxRates, but no default rates found in provided list for calculation."
         end
       end
     end
 
+    @logger.info "Calculated total_tax for order: #{total_tax}"
     total_tax
   end
 end
