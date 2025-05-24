@@ -23,19 +23,6 @@ require "logger"
 require "optparse"
 
 class RestaurantSimulator
-  SETUP_STEPS = [
-    'tax_rates',
-    'categories',
-    'modifier_groups',
-    'menu_items',
-    'discounts',
-    'roles',
-    'employees',
-    'shifts',
-    'customers',
-    'order_types'
-  ]
-
   # Constants for order generation
   DEFAULT_DAYS_RANGE = 7
   DEFAULT_ORDERS_PER_DAY = (5..15)
@@ -45,21 +32,13 @@ class RestaurantSimulator
   def initialize
     @config = CloverRestaurant::Config.new
     @logger = @config.logger
-    @state = CloverRestaurant::StateManager.new
     setup_services
   end
 
   def run(options = {})
     print_header
 
-    if options[:reset]
-      @logger.info "Resetting all state..."
-      @state.reset_all
-    end
-
-    if options[:resume]
-      @logger.info "Resuming from last successful step..."
-    end
+    @logger.info "Starting full setup (always resets everything)..."
 
     begin
       setup_entities
@@ -67,15 +46,10 @@ class RestaurantSimulator
 
       if options[:generate_orders]
         @logger.info "Proceeding to generate past orders and payments..."
-        # Define default ranges or allow them to be configurable later
-        # For now, using constants or direct values if they exist, otherwise defaults.
-        # These might be DEFAULT_DAYS_RANGE and DEFAULT_ORDERS_PER_DAY if defined in the class
-        # or we can use sensible defaults like 7 days, 5-15 orders/day.
         days_to_generate = options.fetch(:days_range, 7) # Default to 7 days
         orders_per_day = options.fetch(:orders_per_day, {min: 5, max: 15}) # Default to 5-15 orders
 
         # Convert orders_per_day to a range if it's a hash
-        # Assuming generate_past_orders expects a range for orders_per_day_range
         orders_per_day_range = if orders_per_day.is_a?(Hash) && orders_per_day[:min] && orders_per_day[:max]
                                  (orders_per_day[:min]..orders_per_day[:max])
                                else
@@ -91,14 +65,6 @@ class RestaurantSimulator
     rescue StandardError => e
       @logger.error "FATAL ERROR: #{e.message}"
       @logger.error e.backtrace.join("\n")
-
-      # Save error state
-      @state.mark_step_completed('last_error', {
-        message: e.message,
-        step: @current_step,
-        time: Time.now.iso8601
-      })
-
       exit 1
     end
   end
@@ -134,270 +100,136 @@ class RestaurantSimulator
   end
 
   def setup_entities
-    @logger.info "Setting up Clover entities..."
+    @logger.info "Setting up Clover entities (full reset)..."
 
-    SETUP_STEPS.each do |step|
-      @current_step = step
+    # Store created entities for use in later steps
+    @created_entities = {
+      tax_rates: [],
+      categories: [],
+      modifier_groups: [],
+      menu_items: [],
+      discounts: [],
+      roles: [],
+      employees: [],
+      shifts: [],
+      customers: [],
+      order_types: []
+    }
 
-      if @state.step_completed?(step)
-        @logger.info "Step '#{step}' already completed, skipping..."
-        next
-      end
+    @logger.info "Step 1: Creating tax rates..."
+    setup_tax_rates
 
-      @logger.info "Step #{SETUP_STEPS.index(step) + 1}: Creating #{step.gsub('_', ' ')}..."
+    @logger.info "Step 2: Creating categories..."
+    setup_categories
 
-      begin
-        case step
-        when 'tax_rates'
-          setup_tax_rates
-        when 'categories'
-          setup_categories
-        when 'modifier_groups'
-          setup_modifier_groups
-        when 'menu_items'
-          setup_menu_items
-        when 'discounts'
-          setup_discounts
-        when 'roles'
-          setup_roles
-        when 'employees'
-          setup_employees
-        when 'shifts'
-          setup_shifts
-        when 'customers'
-          setup_customers
-        when 'order_types'
-          setup_order_types
-        end
+    @logger.info "Step 3: Creating modifier groups..."
+    setup_modifier_groups
 
-        @state.mark_step_completed(step)
-        @logger.info "✅ Successfully completed step: #{step}"
+    @logger.info "Step 4: Creating menu items..."
+    setup_menu_items
 
-        if step == 'menu_items'
-          # Log details of one item directly from Clover to check its price
-          sample_item_from_state = @state.get_entities('menu_item').sample
-          if sample_item_from_state && (sample_item_from_state["clover_id"] || sample_item_from_state["id"])
-            item_id_to_check = sample_item_from_state["clover_id"] || sample_item_from_state["id"]
-            @logger.info "Checking details of sample item ID: #{item_id_to_check} directly from Clover..."
-            fetched_item_details = @services_manager.inventory.get_item(item_id_to_check)
-            @logger.info "Details for item ID #{item_id_to_check} from Clover: #{fetched_item_details.inspect}"
-            if fetched_item_details && fetched_item_details.key?("price")
-              @logger.info "PRICE CHECK: Item ID #{item_id_to_check} has price: #{fetched_item_details["price"]}"
-            else
-              @logger.warn "PRICE CHECK: Item ID #{item_id_to_check} does NOT have a 'price' attribute in the fetched details or fetched_item_details is nil."
-            end
-          else
-            @logger.warn "Could not select a sample menu item from state to check its price."
-          end
-        end
+    @logger.info "Step 5: Creating discounts..."
+    setup_discounts
 
-      rescue StandardError => e
-        @logger.error "❌ Failed to complete step '#{step}': #{e.message}"
-        raise
-      end
-    end
+    @logger.info "Step 6: Creating roles..."
+    setup_roles
+
+    @logger.info "Step 7: Creating employees..."
+    setup_employees
+
+    @logger.info "Step 8: Creating shifts..."
+    setup_shifts
+
+    @logger.info "Step 9: Creating customers..."
+    setup_customers
+
+    @logger.info "Step 10: Creating order types..."
+    setup_order_types
+
+    @logger.info "✅ All entities created successfully!"
   end
 
   def setup_tax_rates
-    return if @state.step_completed?('tax_rates')
-
-    @logger.info "Step 3: Creating standard tax rates..."
+    @logger.info "Creating standard tax rates..."
     created_rates = @services_manager.tax.create_standard_tax_rates
 
     if created_rates && created_rates.any?
       @logger.info "Successfully created or verified #{created_rates.size} standard tax rates."
-      created_rates.each do |rate|
-        @state.record_entity('tax_rate', rate["id"], rate["name"], rate)
-      end
+      @created_entities[:tax_rates] = created_rates
     end
   end
 
   def setup_categories
-    return if @state.step_completed?('categories')
-
-    # Check existing categories (excluding deleted ones)
-    existing_categories = @services_manager.inventory.get_categories
-    if existing_categories && existing_categories["elements"]&.any?
-      non_deleted_categories = existing_categories["elements"].reject { |cat| cat["deleted"] }
-      if non_deleted_categories.any?
-        @logger.info "Found #{non_deleted_categories.size} existing non-deleted categories"
-        non_deleted_categories.each do |category|
-          @state.record_entity('category', category["id"], category["name"], category)
-        end
-        return
-      else
-        @logger.info "Found #{existing_categories["elements"].size} total categories but all are deleted, creating new ones"
-      end
-    end
-
+    @logger.info "Creating standard categories..."
     categories = @services_manager.inventory.create_standard_categories
-    categories.each do |category|
-      @state.record_entity('category', category["id"], category["name"], category)
-    end
+    @created_entities[:categories] = categories.map { |cat| {"clover_id" => cat["id"], "name" => cat["name"], "data" => cat} }
+    @logger.info "Created #{categories.size} categories"
   end
 
   def setup_modifier_groups
-    return if @state.step_completed?('modifier_groups')
-
-    # Check existing modifier groups (excluding deleted ones)
-    existing_groups = @services_manager.inventory.get_modifier_groups
-    if existing_groups && existing_groups["elements"]&.any?
-      non_deleted_groups = existing_groups["elements"].reject { |group| group["deleted"] }
-      if non_deleted_groups.any?
-        @logger.info "Found #{non_deleted_groups.size} existing non-deleted modifier groups"
-        non_deleted_groups.each do |group|
-          @state.record_entity('modifier_group', group["id"], group["name"], group)
-        end
-        return
-      else
-        @logger.info "Found #{existing_groups["elements"].size} total modifier groups but all are deleted, creating new ones"
-      end
-    end
-
+    @logger.info "Creating standard modifier groups..."
     groups = @services_manager.inventory.create_standard_modifier_groups
-    groups.each do |group|
-      @state.record_entity('modifier_group', group["id"], group["name"], group)
-    end
+    @created_entities[:modifier_groups] = groups.map { |group| {"clover_id" => group["id"], "name" => group["name"], "data" => group} }
+    @logger.info "Created #{groups.size} modifier groups"
   end
 
   def setup_menu_items
-    return if @state.step_completed?('menu_items')
-
-    # Check existing menu items first
-    existing_items = @services_manager.inventory.get_all_items
-    if existing_items && existing_items["elements"]&.any?
-      @logger.info "Found #{existing_items["elements"].size} existing menu items"
-      # Check if a reasonable number of items exist (more than just a few test items)
-      if existing_items["elements"].size >= 10
-        @logger.info "Sufficient menu items found (#{existing_items["elements"].size}). Skipping creation."
-        existing_items["elements"].each do |item|
-          @state.record_entity('menu_item', item["id"], item["name"], item)
-        end
-        return
-      else
-        @logger.info "Only #{existing_items["elements"].size} menu items found. Proceeding to create standard menu."
-      end
-    end
-
-    categories = @state.get_entities('category')
-    modifier_groups = @state.get_entities('modifier_group')
-
+    @logger.info "Creating menu items..."
+    categories = @created_entities[:categories]
     items = @services_manager.inventory.create_sample_menu_items(categories)
-    items.each do |item|
-      @state.record_entity('menu_item', item["id"], item["name"], item)
-    end
+    @created_entities[:menu_items] = items.map { |item| {"clover_id" => item["id"], "name" => item["name"], "data" => item} }
+    @logger.info "Created #{items.size} menu items"
   end
 
   def setup_discounts
-    return if @state.step_completed?('discounts')
-
-    # Check existing discounts first
-    existing_discounts = @services_manager.discount.get_discounts
-    if existing_discounts && existing_discounts["elements"]&.any?
-      @logger.info "Found #{existing_discounts["elements"].size} existing discounts."
-      # Check if a good number of standard-looking discounts are present
-      standard_names_pattern = /% Off|Hour|Discount|Special|Customer/i
-      num_existing_standard = existing_discounts["elements"].count { |d| d["name"] =~ standard_names_pattern }
-
-      if num_existing_standard >= 3 # If at least 3 standard-like discounts exist
-        @logger.info "#{num_existing_standard} standard-like discounts found. Assuming setup is sufficient."
-        existing_discounts["elements"].reject { |discount| discount["deleted"] }.each do |discount|
-          @state.record_entity('discount', discount["id"], discount["name"], discount)
-        end
-        return # Skip creating more
-      else
-        @logger.info "Only #{num_existing_standard} standard-like discounts found. Proceeding to create more."
-      end
-    end
-
-    # If not enough or no existing, create standard ones
     @logger.info "Creating standard discounts..."
-    created_discounts = @services_manager.discount.create_standard_discounts # This method handles its own internal checks
+    created_discounts = @services_manager.discount.create_standard_discounts
 
     if created_discounts && created_discounts.is_a?(Array)
-      created_discounts.each do |discount|
-        # Ensure discount is a hash and has an ID before recording
-        if discount.is_a?(Hash) && discount["id"]
-          @state.record_entity('discount', discount["id"], discount["name"], discount)
-        else
-          @logger.warn "A created discount was not in the expected format or lacked an ID: #{discount.inspect}"
-        end
-      end
+      @created_entities[:discounts] = created_discounts.select { |d| d.is_a?(Hash) && d["id"] }
+      @logger.info "Created #{@created_entities[:discounts].size} discounts"
     else
-      @logger.warn "create_standard_discounts did not return an array of discounts as expected: #{created_discounts.inspect}"
-      # Fetch again to be sure, in case some were created but not returned as expected
-      final_check_discounts = @services_manager.discount.get_discounts
-      if final_check_discounts && final_check_discounts["elements"]&.any?
-         final_check_discounts["elements"].reject { |discount| discount["deleted"] }.each do |discount|
-          @state.record_entity('discount', discount["id"], discount["name"], discount)
-        end
-      end
+      @logger.warn "No discounts created or unexpected format: #{created_discounts.inspect}"
+      @created_entities[:discounts] = []
     end
   end
 
   def setup_roles
-    return if @state.step_completed?('roles')
-
-    # Check existing roles (excluding deleted ones)
-    existing_roles = @services_manager.employee.get_roles
-    if existing_roles && existing_roles["elements"]&.any?
-      non_deleted_roles = existing_roles["elements"].reject { |role| role["deleted"] }
-      if non_deleted_roles.any?
-        @logger.info "Found #{non_deleted_roles.size} existing non-deleted roles"
-        non_deleted_roles.each do |role|
-          @state.record_entity('role', role["id"], role["name"], role)
-        end
-        return
-      else
-        @logger.info "Found #{existing_roles["elements"].size} total roles but all are deleted, creating new ones"
-      end
-    end
-
+    @logger.info "Creating standard roles..."
     roles = @services_manager.employee.create_standard_restaurant_roles
-    roles.each do |role|
-      @state.record_entity('role', role["id"], role["name"], role)
-    end
+    @created_entities[:roles] = roles.map { |role| {"clover_id" => role["id"], "name" => role["name"], "data" => role} }
+    @logger.info "Created #{roles.size} roles"
   end
 
   def setup_employees
-    return if @state.step_completed?('employees')
-
-    roles = @state.get_entities('role')
+    @logger.info "Creating employees..."
+    roles = @created_entities[:roles]
     employees = @services_manager.employee.create_random_employees(15, roles)
-    employees.each do |employee|
-      @state.record_entity('employee', employee["id"], employee["name"], employee)
-    end
+    @created_entities[:employees] = employees.map { |emp| {"clover_id" => emp["id"], "name" => emp["name"], "data" => emp} }
+    @logger.info "Created #{employees.size} employees"
   end
 
   def setup_shifts
-    return if @state.step_completed?('shifts')
-
-    employees = @state.get_entities('employee')
+    @logger.info "Creating shifts..."
+    employees = @created_entities[:employees]
+    shifts = []
     employees.each do |employee|
       shift = @services_manager.employee.clock_in(employee["clover_id"])
-      @state.record_entity('shift', shift["id"], "#{employee["name"]}_shift", shift) if shift
+      if shift
+        shifts << {"clover_id" => shift["id"], "name" => "#{employee["name"]}_shift", "data" => shift}
+      end
     end
+    @created_entities[:shifts] = shifts
+    @logger.info "Created #{shifts.size} shifts"
   end
 
   def setup_customers
-    return if @state.step_completed?('customers')
-
-    # Check existing customers first (optional, but good practice if API supports efficient lookup)
-    # For this example, we'll just create new ones if the step isn't completed.
-    # If you wanted to check, you might do something like:
-    # existing_customers = @services_manager.customer.get_customers
-    # if existing_customers && existing_customers["elements"]&.any?
-    #   @logger.info "Found #{existing_customers["elements"].size} existing customers"
-    #   existing_customers["elements"].each do |cust|
-    #     @state.record_entity('customer', cust["id"], cust["firstName"] ? "#{cust["firstName"]} #{cust["lastName"]}" : "Customer #{cust["id"]}", cust)
-    #   end
-    #   return
-    # end
-
+    @logger.info "Creating customers..."
     customers = @services_manager.customer.create_random_customers(30) # Create 30 random customers
+    valid_customers = []
+
     customers.each do |customer|
       if customer && customer["id"]
-        # Determine a display name for the customer
         display_name = if customer["firstName"] && customer["lastName"]
                          "#{customer["firstName"]} #{customer["lastName"]}"
                        elsif customer["firstName"]
@@ -407,38 +239,44 @@ class RestaurantSimulator
                        else
                          "Customer #{customer["id"]}"
                        end
-        @state.record_entity('customer', customer["id"], display_name, customer)
+        valid_customers << {"clover_id" => customer["id"], "name" => display_name, "data" => customer}
       else
         @logger.warn "Failed to create or retrieve ID for a customer: #{customer.inspect}"
       end
     end
+
+    @created_entities[:customers] = valid_customers
+    @logger.info "Created #{valid_customers.size} customers"
   end
 
   def setup_order_types
-    return if @state.step_completed?('order_types')
+    @logger.info "Creating order types..."
 
+    # Try to get existing order types first
     existing_order_types_response = @services_manager.merchant.get_order_types
     if existing_order_types_response && existing_order_types_response["elements"]&.any?
       @logger.info "Found #{existing_order_types_response["elements"].size} existing order types."
-      existing_order_types_response["elements"].each do |ot|
-        @state.record_entity('order_type', ot["id"], ot["label"] || ot["name"], ot)
+      order_types = existing_order_types_response["elements"].map do |ot|
+        {"clover_id" => ot["id"], "name" => ot["label"] || ot["name"], "data" => ot}
       end
-      return # Assuming existing ones are sufficient
+      @created_entities[:order_types] = order_types
+      return
     end
 
-    @logger.info "No existing order types found or error fetching. Creating default order types."
+    @logger.info "No existing order types found, creating default ones..."
     default_order_types = [
       { name: "Dine In", label: "Dine In", taxable: true, isDefault: true },
       { name: "Take Out", label: "Take Out", taxable: true, isDefault: false },
       { name: "Delivery", label: "Delivery", taxable: true, isDefault: false }
     ]
 
+    created_order_types = []
     default_order_types.each do |ot_data|
       begin
         created_ot = @services_manager.merchant.create_order_type(ot_data)
         if created_ot && created_ot["id"]
           @logger.info "✅ Successfully created order type: #{created_ot["label"]}"
-          @state.record_entity('order_type', created_ot["id"], created_ot["label"], created_ot)
+          created_order_types << {"clover_id" => created_ot["id"], "name" => created_ot["label"], "data" => created_ot}
         else
           @logger.error "❌ Failed to create order type: #{ot_data[:label]}. Response: #{created_ot.inspect}"
         end
@@ -446,17 +284,18 @@ class RestaurantSimulator
         @logger.error "❌ Error creating order type #{ot_data[:label]}: #{e.message}"
       end
     end
+
+    @created_entities[:order_types] = created_order_types
+    @logger.info "Created #{created_order_types.size} order types"
   end
 
   def print_summary
-    summary = @state.get_creation_summary
-
     table = Terminal::Table.new do |t|
       t.title = "Setup Summary"
       t.headings = ['Entity Type', 'Count']
 
-      summary.each do |type, count|
-        t.add_row [type, count]
+      @created_entities.each do |type, entities|
+        t.add_row [type.to_s.gsub('_', ' ').titleize, entities.size]
       end
     end
 
@@ -511,13 +350,13 @@ class RestaurantSimulator
     logger.info "Loading resources from Clover..."
 
     resources = {
-      items: fetch_with_rescue { @state.get_entities('menu_item') },
-      categories: fetch_with_rescue { @services_manager.inventory.get_categories["elements"] },
-      customers: fetch_with_rescue { @state.get_entities('customer') },
-      employees: fetch_with_rescue { @services_manager.employee.get_employees["elements"] },
+      items: fetch_with_rescue { @created_entities[:menu_items] },
+      categories: fetch_with_rescue { @created_entities[:categories] },
+      customers: fetch_with_rescue { @created_entities[:customers] },
+      employees: fetch_with_rescue { @created_entities[:employees] },
       tenders: filter_safe_tenders(fetch_with_rescue { @services_manager.tender.get_tenders }),
-      discounts: fetch_with_rescue { @services_manager.discount.get_discounts["elements"] },
-      tax_rates: fetch_with_rescue { @services_manager.tax.get_tax_rates["elements"] }
+      discounts: fetch_with_rescue { @created_entities[:discounts] },
+      tax_rates: fetch_with_rescue { @created_entities[:tax_rates] }
     }
 
     # Pre-organize items by category to avoid duplicate processing
@@ -863,7 +702,7 @@ class RestaurantSimulator
   # Optimized order creation that minimizes API calls
   def create_optimized_order(timestamp, resources, prepared_line_items, order_discount = nil, total_price_pre_order_discount = nil)
     # Step 1: Define Order Type and Note
-    order_type_to_use = @state.get_entities('order_type')&.sample
+    order_type_to_use = @created_entities[:order_types]&.sample
     unless order_type_to_use && (order_type_to_use["clover_id"] || order_type_to_use["id"])
       @logger.error "No order types available in state or missing ID. Cannot create order."
       return false
@@ -1038,7 +877,7 @@ class RestaurantSimulator
       unless employee_id_for_payment
          @logger.warn "No employee ID found for payment on order #{current_order_details['id']}. Payment might fail or use a default."
          # Fallback if truly no employee can be found (should be rare if setup is complete)
-         employee_id_for_payment = @state.get_entities('employee')&.sample&.[]("id")
+         employee_id_for_payment = @created_entities[:employees]&.sample&.[]("id")
       end
 
       tip_percentage = rand(15..25) # Tip between 15% and 25%
@@ -1336,7 +1175,7 @@ class RestaurantSimulator
     return 0 unless line_items_elements && line_items_elements.is_a?(Array)
 
     # Fetch all default tax rates from the provided list
-    # MODIFICATION: Use all_tax_rates parameter instead of @state
+    # MODIFICATION: Use all_tax_rates parameter instead of @created_entities
     default_tax_rates_from_param = all_tax_rates.select { |tr| tr["isDefault"] == true }
 
     # Fallback to any "Sales Tax" if no explicit defaults found
@@ -1414,22 +1253,9 @@ options = {}
 OptionParser.new do |opts|
   opts.banner = "Usage: simulate_restaurant.rb [options]"
 
-  opts.on("--reset", "Reset all existing data before running") do |r|
-    options[:reset] = r
-  end
-
-  opts.on("--resume", "Resume from the last successful step") do |r|
-    options[:resume] = r
-  end
-
   opts.on("--generate-orders", "Generate past orders and payments after setup") do |g|
     options[:generate_orders] = g
   end
-
-  # Potentially add options for days_range and orders_per_day here if desired
-  # opts.on("--days-range DAYS", Integer, "Number of past days to generate orders for") do |days|
-  #   options[:days_range] = days
-  # end
 
 end.parse!
 
